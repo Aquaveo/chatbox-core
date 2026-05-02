@@ -1,21 +1,47 @@
-# @chatbox/core
+# @aquaveo/chatbox-core
 
 Generic chatbox engine and UI components. Works with any Ollama-compatible backend and MCP server. Framework-agnostic — consumers can use Vite, webpack, or any bundler.
 
 ## Installation
 
 ```bash
-# As a local file link (monorepo)
-npm install @chatbox/core@file:../../packages/chatbox-core
+npm install @aquaveo/chatbox-core
+# or, for the prerelease channel during early stabilization:
+npm install @aquaveo/chatbox-core@beta
 
-# Peer dependencies
+# Peer dependencies (must be installed by the consumer)
 npm install react react-dom styled-components
 ```
+
+### Peer dependencies
+
+| Package | Version | Why |
+|---|---|---|
+| `react` | `>=17.0.0` | Hooks (`useState`, `useEffect`, `useCallback`) |
+| `react-dom` | `>=17.0.0` | Render surface |
+| `styled-components` | `>=5.0.0` | Component theming |
+
+### Optional dependencies
+
+| Package | Purpose |
+|---|---|
+| `@huggingface/transformers` | Local embeddings; only loaded when consumed |
+
+### Status
+
+`0.2.0-beta.0` is the first prerelease publish. The API is **pre-1.0** — minor bumps may carry breaking changes during stabilization. For production use, pin to a specific version (e.g., `"@aquaveo/chatbox-core": "0.2.0-beta.0"`) until `1.0.0` lands.
+
+### Source
+
+- Repository: [github.com/Aquaveo/chatbox-core](https://github.com/Aquaveo/chatbox-core)
+- Issues: [github.com/Aquaveo/chatbox-core/issues](https://github.com/Aquaveo/chatbox-core/issues)
+- Changelog: [CHANGELOG.md](./CHANGELOG.md)
+- License: [MIT](./LICENSE)
 
 ## Quick Start
 
 ```jsx
-import { Chatbox } from "@chatbox/core/components";
+import { Chatbox } from "@aquaveo/chatbox-core/components";
 
 function App() {
   return <Chatbox ollamaHost="https://ollama.com" ollamaApiKey="your-key" />;
@@ -63,7 +89,7 @@ Read env vars in your entry point and pass as props. The library itself never re
 
 ```jsx
 // App.jsx
-import { Chatbox } from "@chatbox/core/components";
+import { Chatbox } from "@aquaveo/chatbox-core/components";
 
 const ollamaHost = import.meta.env.VITE_OLLAMA_HOST?.trim() || undefined;
 const ollamaApiKey = import.meta.env.VITE_OLLAMA_API_KEY?.trim() || undefined;
@@ -122,7 +148,7 @@ Pass the server-side proxy path and CSRF token from your app context:
 
 ```jsx
 // ChatSidebar.js
-import { Chatbox } from "@chatbox/core/components";
+import { Chatbox } from "@aquaveo/chatbox-core/components";
 
 function ChatSidebar() {
   const { tethysApp, csrf } = useContext(AppContext);
@@ -162,7 +188,7 @@ See `src/engine/index.js` for full signatures and default behavior.
 **Example (NRDS domain):**
 
 ```jsx
-import { Chatbox } from "@chatbox/core/components";
+import { Chatbox } from "@aquaveo/chatbox-core/components";
 
 const extensions = {
   systemPromptBuilder: buildNrdsSystemMessage,
@@ -177,23 +203,30 @@ const extensions = {
 ## Subpath Imports
 
 ```js
-import { Chatbox } from "@chatbox/core/components";     // UI components
-import { runChatSession } from "@chatbox/core/engine";   // Chat engine
-import { listOllamaModels } from "@chatbox/core/helpers"; // Utilities
-import { estimateTokens } from "@chatbox/core/conversation"; // Token management
-import { DEFAULT_OLLAMA_HOST } from "@chatbox/core/config"; // Static defaults
-import { buildGenericSystemMessage } from "@chatbox/core/messages"; // System prompts
-import { getMcpServers } from "@chatbox/core/storage";   // localStorage MCP config
-import chatTheme from "@chatbox/core/theme";             // Design tokens
+import { Chatbox } from "@aquaveo/chatbox-core/components";     // UI components
+import { runChatSession } from "@aquaveo/chatbox-core/engine";   // Chat engine
+import { listOllamaModels } from "@aquaveo/chatbox-core/helpers"; // Utilities
+import { estimateTokens } from "@aquaveo/chatbox-core/conversation"; // Token management
+import { DEFAULT_OLLAMA_HOST } from "@aquaveo/chatbox-core/config"; // Static defaults
+import { buildGenericSystemMessage } from "@aquaveo/chatbox-core/messages"; // System prompts
+import { getMcpServers } from "@aquaveo/chatbox-core/storage";   // localStorage MCP config
+import chatTheme from "@aquaveo/chatbox-core/theme";             // Design tokens
 ```
 
-## Building
+## Development
+
+Working on the package itself (cloned the repo, want to iterate locally):
 
 ```bash
-cd packages/chatbox-core
-npm run build        # one-time build to dist/
-npm run dev          # watch mode (rebuild on changes)
+git clone git@github.com:Aquaveo/chatbox-core.git
+cd chatbox-core
+npm install
+npm test                    # 105 vitest tests, ~1s
+npm run build               # one-time build to dist/
+npm run dev                 # watch mode
 ```
+
+For consumers who want to co-develop the package alongside their app, use a `file:` link in the consumer's `package.json` (`"@aquaveo/chatbox-core": "file:../path/to/chatbox-core"`) and add `legacy-peer-deps=true` to the linked package's `.npmrc` to avoid duplicate React from npm 7+'s peer-dep auto-install.
 
 The build produces ES modules in `dist/`. Consumers import the pre-built output. The library externalizes `react`, `react-dom`, and `styled-components` as peer dependencies.
 

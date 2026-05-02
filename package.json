@@ -1,7 +1,28 @@
 {
-  "name": "@chatbox/core",
-  "version": "0.2.0",
+  "name": "@aquaveo/chatbox-core",
+  "version": "0.2.0-beta.0",
   "description": "Generic chatbox engine, UI components, and helpers. Self-contained build — consumers only need react + styled-components.",
+  "license": "MIT",
+  "author": "Aquaveo LLC",
+  "homepage": "https://github.com/Aquaveo/chatbox-core#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Aquaveo/chatbox-core.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Aquaveo/chatbox-core/issues"
+  },
+  "keywords": [
+    "mcp",
+    "chatbox",
+    "react",
+    "llm",
+    "tools",
+    "model-context-protocol"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "type": "module",
   "main": "dist/index.js",
   "module": "dist/index.js",
@@ -17,11 +38,21 @@
     "./components": "./dist/components/index.js",
     "./theme": "./dist/theme/index.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "vite build",
     "dev": "vite build --watch",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepublishOnly": "npm test && npm run build"
   },
   "peerDependencies": {
     "react": ">=17.0.0",
