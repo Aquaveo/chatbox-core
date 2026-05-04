@@ -27,6 +27,7 @@ import { CONTEXT_BUDGET_RATIO } from "../config/index.js";
 import { getMcpServers, addMcpServer, removeMcpServer, toggleMcpServer } from "../storage/mcpStorage.js";
 import { sanitizeServerName, stripUrlCredentials } from "../helpers/url.js";
 import { buildMcpStatusMessage } from "../helpers/buildMcpStatusMessage.js";
+import { scheduleDispatchIfFresh } from "../helpers/scheduleDispatch.js";
 import { getProviderConfig } from "../storage/llmProviderStorage.js";
 import ChatLog from "./ChatLog";
 import ChatInputBar from "./ChatInputBar";
@@ -378,6 +379,10 @@ export default function Chatbox({
 
   const chatLogRef = useRef(null);
   const abortRef = useRef(null);
+  // Per-turn identity for the rAF freshness check at the two
+  // update-visualization dispatch sites below. Bumped on each user send;
+  // captured at schedule time, compared at fire time. See helpers/scheduleDispatch.js.
+  const turnIdRef = useRef(0);
 
   const stopGeneration = useCallback(() => { abortRef.current?.abort(); }, []);
 
@@ -421,6 +426,12 @@ export default function Chatbox({
   const sendMessage = useCallback(async () => {
     const userText = input.trim();
     if (!userText || loading) return;
+
+    // Bump turn-id BEFORE any work — pending rAF callbacks from a prior
+    // turn are now stale and will bail at fire time. capturedTurnId is
+    // taken below and threaded into the rAF freshness check.
+    turnIdRef.current += 1;
+    const capturedTurnId = turnIdRef.current;
 
     setError("");
     setThinkingBuffer("");
@@ -583,14 +594,18 @@ export default function Chatbox({
         ([uuid]) => !matchedLayerUuids.has(uuid),
       );
       if (unmatchedUpdates.length > 0) {
-        requestAnimationFrame(() => {
-          for (const [uuid, layers] of unmatchedUpdates) {
-            window.dispatchEvent(
-              new CustomEvent("tethysdash:update-visualization", {
-                detail: { uuid, operation: "append_layers", layers },
-              }),
-            );
-          }
+        scheduleDispatchIfFresh({
+          getCurrentTurnId: () => turnIdRef.current,
+          capturedTurnId,
+          dispatch: () => {
+            for (const [uuid, layers] of unmatchedUpdates) {
+              window.dispatchEvent(
+                new CustomEvent("tethysdash:update-visualization", {
+                  detail: { uuid, operation: "append_layers", layers },
+                }),
+              );
+            }
+          },
         });
       }
 
@@ -607,17 +622,17 @@ export default function Chatbox({
       // + a bare-index-op patch on the same UUID's /args/layers). Those ARE
       // order-dependent (which layer does /args/layers/2 refer to — pre- or
       // post-add?), so we force the LLM to split across turns.
-      const patchesByUuid = {};
+      // Per-envelope construction (Plan 20 #15 fix): emit one patches[]
+      // entry per engine envelope. Same UUID may appear multiple times.
+      // DashboardLayout's apply_patch handler iterates entries with
+      // partial-batch tolerance, so per-envelope failure isolation is
+      // free — envelope-2's failure no longer poisons envelope-1.
+      const patchEntries = [];
       if (result.patches?.length > 0) {
         for (const patch of result.patches) {
           const uuid = patch?.uuid;
-          if (!uuid) continue;
-          if (!patchesByUuid[uuid]) {
-            patchesByUuid[uuid] = { source: patch.source, ops: [] };
-          }
-          if (Array.isArray(patch.ops)) {
-            patchesByUuid[uuid].ops.push(...patch.ops);
-          }
+          if (!uuid || !Array.isArray(patch.ops) || patch.ops.length === 0) continue;
+          patchEntries.push({ uuid, source: patch.source, ops: patch.ops });
         }
       }
 
@@ -625,24 +640,34 @@ export default function Chatbox({
       // bare-index-op patch on same UUID's /args/layers). Only bare-index
       // targets collide (/args/layers/N or /args/layers/-); field-level
       // patches under a layer (/args/layers/N/fieldName) are fine.
+      // Per-entry post-#15: same-UUID entries are evaluated independently;
+      // a rejected bare-index entry does not poison sibling field-level
+      // entries on the same UUID.
       const BARE_LAYER_INDEX = /^\/args\/layers\/(\d+|-)$/;
       const rejectedCollision = [];
-      for (const uuid of Object.keys(patchesByUuid)) {
-        if (!layerUpdatesByUuid[uuid]) continue;
-        const hasBareIndexOp = patchesByUuid[uuid].ops.some(
-          (op) => typeof op?.path === "string" && BARE_LAYER_INDEX.test(op.path),
-        );
-        if (hasBareIndexOp) {
-          rejectedCollision.push(uuid);
-          delete patchesByUuid[uuid];
+      const survivingEntries = [];
+      for (const entry of patchEntries) {
+        const { uuid, ops } = entry;
+        if (layerUpdatesByUuid[uuid]) {
+          const hasBareIndexOp = ops.some(
+            (op) => typeof op?.path === "string" && BARE_LAYER_INDEX.test(op.path),
+          );
+          if (hasBareIndexOp) {
+            rejectedCollision.push(uuid);
+            continue;
+          }
         }
+        survivingEntries.push(entry);
       }
-      if (rejectedCollision.length > 0 && typeof console !== "undefined") {
+      // De-dup before logging / surfacing — under per-envelope, the same
+      // UUID may be reported once per rejected envelope.
+      const rejectedCollisionUnique = Array.from(new Set(rejectedCollision));
+      if (rejectedCollisionUnique.length > 0 && typeof console !== "undefined") {
         console.warn(
           "[chatbox] cross_source_collision: patches skipped for UUIDs " +
             "where add_map_service_layer + bare-index patch ops collide " +
             "on /args/layers. Split into two turns so ordering is explicit.",
-          rejectedCollision,
+          rejectedCollisionUnique,
         );
       }
       // Surface the rejection to the user. The MCP server already returned
@@ -651,10 +676,10 @@ export default function Chatbox({
       // claim is a silent lie — the user sees layers added but the patch
       // dropped. Prepending a warning to the assistant content gives the
       // user a clear next-step: split into two turns.
-      const collisionWarning = rejectedCollision.length > 0
+      const collisionWarning = rejectedCollisionUnique.length > 0
         ? `⚠ Some edits were skipped to avoid ambiguous layer ordering ` +
-          `(cross_source_collision on UUID${rejectedCollision.length > 1 ? "s" : ""} ` +
-          `${rejectedCollision.join(", ")}). ` +
+          `(cross_source_collision on UUID${rejectedCollisionUnique.length > 1 ? "s" : ""} ` +
+          `${rejectedCollisionUnique.join(", ")}). ` +
           `Retry those edits in a separate message so the layer changes ` +
           `apply in a well-defined order.\n\n`
         : "";
@@ -674,25 +699,26 @@ export default function Chatbox({
       const whitelistWarning = _buildWhitelistWarning(result.rejectedPatches);
 
       // Batch dispatch: ONE tethysdash:update-visualization event carrying
-      // all remaining patches, scheduled via rAF alongside the layer-update
+      // all surviving entries, scheduled via rAF alongside the layer-update
       // path. Per docs/solutions/logic-errors/stale-ref-batch-dispatch-*,
       // never dispatch N events in a loop when a batch shape exists.
-      const patchEntries = Object.entries(patchesByUuid);
-      if (patchEntries.length > 0) {
-        requestAnimationFrame(() => {
-          window.dispatchEvent(
-            new CustomEvent("tethysdash:update-visualization", {
-              detail: {
-                batch: true,
-                operation: "apply_patch",
-                patches: patchEntries.map(([uuid, { source, ops }]) => ({
-                  uuid,
-                  source,
-                  ops,
-                })),
-              },
-            }),
-          );
+      // Wrapped in scheduleDispatchIfFresh so a stale Turn-N rAF callback
+      // is skipped if Turn N+1 has started before it fires (Plan 20 #16).
+      if (survivingEntries.length > 0) {
+        scheduleDispatchIfFresh({
+          getCurrentTurnId: () => turnIdRef.current,
+          capturedTurnId,
+          dispatch: () => {
+            window.dispatchEvent(
+              new CustomEvent("tethysdash:update-visualization", {
+                detail: {
+                  batch: true,
+                  operation: "apply_patch",
+                  patches: survivingEntries,
+                },
+              }),
+            );
+          },
         });
       }
 
