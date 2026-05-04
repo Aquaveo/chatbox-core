@@ -5,6 +5,8 @@
  */
 import Anthropic from "@anthropic-ai/sdk";
 
+import { anthropicThinkingParams } from "./anthropicThinkingParams.js";
+
 /**
  * Translate engine messages (OpenAI format) to Anthropic format.
  */
@@ -101,13 +103,10 @@ export async function streamChat({
     messages: translatedMessages,
     max_tokens: 8192,
   };
-  if (wantThinking) {
-    const budget = Number(thinkingBudget) || 4096;
-    streamParams.thinking = { type: "enabled", budget_tokens: budget };
-    streamParams.temperature = 1;
-  } else {
-    streamParams.temperature = 0;
-  }
+  Object.assign(
+    streamParams,
+    anthropicThinkingParams({ model, thinkingBudget, wantThinking }),
+  );
   if (system) streamParams.system = system;
   if (anthropicTools?.length) streamParams.tools = anthropicTools;
 
