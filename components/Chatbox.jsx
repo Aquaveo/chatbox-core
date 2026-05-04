@@ -26,6 +26,7 @@ import { estimateTokens } from "../conversation/index.js";
 import { CONTEXT_BUDGET_RATIO } from "../config/index.js";
 import { getMcpServers, addMcpServer, removeMcpServer, toggleMcpServer } from "../storage/mcpStorage.js";
 import { sanitizeServerName, stripUrlCredentials } from "../helpers/url.js";
+import { buildMcpStatusMessage } from "../helpers/buildMcpStatusMessage.js";
 import { getProviderConfig } from "../storage/llmProviderStorage.js";
 import ChatLog from "./ChatLog";
 import ChatInputBar from "./ChatInputBar";
@@ -490,11 +491,8 @@ export default function Chatbox({
           next.set(outcome.url, { state: outcome.state, errorKey: outcome.errorKey });
           return next;
         });
-        if (outcome.state !== "connected") {
-          const displayName = outcome.name || outcome.url;
-          const text = outcome.state === "no-tools"
-            ? `MCP server "${displayName}" reports no tools.`
-            : `Couldn't reach MCP server "${displayName}" — skipping its tools for this message.`;
+        const text = buildMcpStatusMessage(outcome);
+        if (text) {
           systemMessages.push({ role: "system", content: text });
         }
       }
