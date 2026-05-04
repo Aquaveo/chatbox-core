@@ -28,6 +28,7 @@ import { getMcpServers, addMcpServer, removeMcpServer, toggleMcpServer } from ".
 import { sanitizeServerName, stripUrlCredentials } from "../helpers/url.js";
 import { buildMcpStatusMessage } from "../helpers/buildMcpStatusMessage.js";
 import { scheduleDispatchIfFresh } from "../helpers/scheduleDispatch.js";
+import { buildPatchEntries } from "../helpers/buildPatchEntries.js";
 import { getProviderConfig } from "../storage/llmProviderStorage.js";
 import ChatLog from "./ChatLog";
 import ChatInputBar from "./ChatInputBar";
@@ -622,46 +623,11 @@ export default function Chatbox({
       // + a bare-index-op patch on the same UUID's /args/layers). Those ARE
       // order-dependent (which layer does /args/layers/2 refer to — pre- or
       // post-add?), so we force the LLM to split across turns.
-      // Per-envelope construction (Plan 20 #15 fix): emit one patches[]
-      // entry per engine envelope. Same UUID may appear multiple times.
-      // DashboardLayout's apply_patch handler iterates entries with
-      // partial-batch tolerance, so per-envelope failure isolation is
-      // free — envelope-2's failure no longer poisons envelope-1.
-      const patchEntries = [];
-      if (result.patches?.length > 0) {
-        for (const patch of result.patches) {
-          const uuid = patch?.uuid;
-          if (!uuid || !Array.isArray(patch.ops) || patch.ops.length === 0) continue;
-          patchEntries.push({ uuid, source: patch.source, ops: patch.ops });
-        }
-      }
-
-      // Rejection: cross_source_collision (add_map_service_layer +
-      // bare-index-op patch on same UUID's /args/layers). Only bare-index
-      // targets collide (/args/layers/N or /args/layers/-); field-level
-      // patches under a layer (/args/layers/N/fieldName) are fine.
-      // Per-entry post-#15: same-UUID entries are evaluated independently;
-      // a rejected bare-index entry does not poison sibling field-level
-      // entries on the same UUID.
-      const BARE_LAYER_INDEX = /^\/args\/layers\/(\d+|-)$/;
-      const rejectedCollision = [];
-      const survivingEntries = [];
-      for (const entry of patchEntries) {
-        const { uuid, ops } = entry;
-        if (layerUpdatesByUuid[uuid]) {
-          const hasBareIndexOp = ops.some(
-            (op) => typeof op?.path === "string" && BARE_LAYER_INDEX.test(op.path),
-          );
-          if (hasBareIndexOp) {
-            rejectedCollision.push(uuid);
-            continue;
-          }
-        }
-        survivingEntries.push(entry);
-      }
-      // De-dup before logging / surfacing — under per-envelope, the same
-      // UUID may be reported once per rejected envelope.
-      const rejectedCollisionUnique = Array.from(new Set(rejectedCollision));
+      // Per-envelope construction + cross_source_collision filtering.
+      // See helpers/buildPatchEntries.js for the contract; tests in
+      // helpers/buildPatchEntries.test.js lock the per-envelope semantics.
+      const { entries: survivingEntries, rejectedCollision: rejectedCollisionUnique } =
+        buildPatchEntries(result.patches, layerUpdatesByUuid);
       if (rejectedCollisionUnique.length > 0 && typeof console !== "undefined") {
         console.warn(
           "[chatbox] cross_source_collision: patches skipped for UUIDs " +
