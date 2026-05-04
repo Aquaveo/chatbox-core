@@ -316,7 +316,7 @@ async function streamWithAdapter({
 // Generic Tool Processing
 // ---------------------------------------------------------------------------
 
-async function processToolCalls(
+export async function processToolCalls(
   toolCalls, messages, connections, toolServerMap, state, originalUserText,
   { toolCategories, beforeToolExecution, toolErrorCheck, afterToolExecution },
 ) {
