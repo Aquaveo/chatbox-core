@@ -27,10 +27,16 @@ export function makeFakeTransport(overrides = {}) {
  * Build a fake `Client` instance with `connect()` and `listTools()` as
  * `vi.fn()`s. Defaults: connect resolves; listTools returns no tools.
  */
-export function makeFakeClient({ tools = [], connectImpl, listToolsImpl } = {}) {
+export function makeFakeClient({
+  tools = [],
+  connectImpl,
+  listToolsImpl,
+  callToolImpl,
+} = {}) {
   return {
     connect: connectImpl ?? vi.fn().mockResolvedValue(undefined),
     listTools: listToolsImpl ?? vi.fn().mockResolvedValue({ tools }),
+    callTool: callToolImpl ?? vi.fn().mockResolvedValue({ data: null }),
   };
 }
 
