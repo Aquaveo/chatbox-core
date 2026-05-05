@@ -14,6 +14,13 @@ const ChatRow = styled.div`
   align-items: flex-start;
   gap: ${({ theme }) => theme.spacing.md};
   flex-direction: ${(props) => (props.$isUser ? "row-reverse" : "row")};
+  /* Without min-width: 0, flex items default to min-width: auto (content
+     min-width). A wide child (e.g., a single-line code block) then
+     pushes the row wider than its parent and triggers a sidebar-level
+     horizontal scrollbar. Set min-width: 0 + max-width: 100% so the
+     row stays inside its column. */
+  min-width: 0;
+  max-width: 100%;
 `;
 
 const Avatar = styled.div`
@@ -36,12 +43,25 @@ const Bubble = styled.article`
   min-width: 0;
   overflow: hidden;
   background: ${(props) => (props.$isUser ? props.theme.colors.userBubble : props.theme.colors.assistantBubble)};
-  max-width: ${(props) => (props.$isUser ? "80%" : "100%")};
+  max-width: ${(props) => (props.$isUser ? "90%" : "100%")};
   flex: ${(props) => (props.$isUser ? "unset" : "1")};
 
-  p { margin: 0; white-space: pre-wrap; }
-  pre, code, .max-w-none, .max-w-none > div, .max-w-none span {
-    white-space: pre-wrap; word-break: break-all; overflow-wrap: break-word;
+  /* Plan 002 R7 — assistant turns produced under tool-gating get a faint
+     left-border marker so users scrolling back through chat history can
+     identify which responses happened with tools disabled. Subtle by
+     design — same muted register as ToolStatusText, no new color. */
+  ${(props) =>
+    props.$toolsGated &&
+    `
+    border-left: 3px solid ${props.theme.colors.borderLight || "#c8d8e2"};
+    padding-left: calc(0.9rem - 3px);
+  `}
+
+  /* Wrap long unbreakable strings in code without forcing prose breaks. */
+  pre, code {
+    white-space: pre-wrap;
+    word-break: normal;
+    overflow-wrap: anywhere;
   }
 `;
 
@@ -96,7 +116,7 @@ export default function ChatMessage({ message, isEmbedded, MessageRenderer }) {
       <Avatar $isUser={isUser}>
         {isUser ? <UserIcon /> : <BotIcon />}
       </Avatar>
-      <Bubble $isUser={isUser}>
+      <Bubble $isUser={isUser} $toolsGated={Boolean(message._toolsGated)} title={message._toolsGated ? "Generated with tools disabled" : undefined}>
         {!isUser && message.thinking && (
           <ThinkingDropdown>
             <summary>Thinking</summary>

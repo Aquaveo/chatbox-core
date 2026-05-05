@@ -13,13 +13,20 @@
  */
 
 import {
-  extractInlineToolCalls,
+  detectAndStripToolShapedJson,
+  extractInlineToolCallsWithResidual,
   getMessage,
+  looksLikeToolRefusal,
   maybeParseJson,
   omitEmptyArgs,
   mergeToolCalls,
   stripThinkTags,
 } from "../helpers/index.js";
+import {
+  getOverride as getCapabilityOverride,
+  recordFailure,
+  resetFailureCounter,
+} from "../storage/capabilityStorage.js";
 import {
   pickTransport,
   closeMcpConnection,
@@ -170,6 +177,75 @@ async function selectToolsForPrompt(prompt, toolsByServer, classificationByServe
 // ---------------------------------------------------------------------------
 // URL normalization, transport selection, and connection lifecycle live in
 // `./transports.js`. Credential-inheritance audit documented there too.
+
+/**
+ * Resolve a model's tool-use capability from a populated model list and
+ * provider context.
+ *
+ * Lookup order:
+ *   1. modelList entry — if found, use its `capabilities` array.
+ *   2. Per-provider fallback default:
+ *        anthropic, openai → "supported" (these providers either return
+ *          the capability via API or are name-pattern-matched in
+ *          listModels; if a model isn't on the list at all, we still
+ *          trust the provider since these are well-known tool-capable
+ *          ecosystems and any genuine outlier gets caught by auto-learn).
+ *        ollama → "unknown" — Ollama models without a populated
+ *          capabilities entry are signal-less and default to safe-off.
+ *        custom → "unknown" — no signal available; engine treats unknown
+ *          for custom as tools-ON per Plan 002 R5 (tethysdash value loop
+ *          is tool-driven; loud refusal is preferable to silent failure).
+ *
+ * Returns: `"supported"` | `"unsupported"` | `"unknown"`.
+ *
+ * Pure function — no I/O, exported for unit testing.
+ */
+export function resolveModelCapability(modelName, modelList, providerName) {
+  // Override store wins (auto-learned + future user overrides). Lookup is
+  // a localStorage read with TTL + schema-version check; expired or
+  // invalid entries are ignored automatically.
+  const override = getCapabilityOverride(providerName, modelName);
+  if (override) return override.toolUse;
+
+  if (Array.isArray(modelList)) {
+    const entry = modelList.find((m) => m?.name === modelName);
+    if (entry && Array.isArray(entry.capabilities)) {
+      return entry.capabilities.includes("tools") ? "supported" : "unsupported";
+    }
+  }
+  if (providerName === "anthropic" || providerName === "openai") return "supported";
+  return "unknown";
+}
+
+/**
+ * Apply a `beforeFirstMessage` extension return value to the message array.
+ *
+ * If the extension returns a `role: "system"` message AND the trailing
+ * message is already a user turn, merge the system content into the user
+ * message instead of appending separately. This preserves strict
+ * user/assistant alternation required by some providers (Ollama Cloud
+ * rejects mid-conversation system messages with "Conversation roles must
+ * alternate user/assistant/...").
+ *
+ * Other return shapes (non-system role, no trailing user message, or null)
+ * fall through to the original append-or-skip behavior.
+ *
+ * Returns a new messages array; does not mutate the input.
+ */
+export function applyExtensionMessage(messages, extra) {
+  if (!extra) return messages;
+
+  const last = messages[messages.length - 1];
+  if (extra.role === "system" && last?.role === "user") {
+    const merged = {
+      ...last,
+      content: `${extra.content ?? ""}\n\n${last.content ?? ""}`,
+    };
+    return [...messages.slice(0, -1), merged];
+  }
+
+  return [...messages, extra];
+}
 
 export async function connectMcpServers(mcpServers) {
   const connections = [];
@@ -467,7 +543,13 @@ export async function runChatSession({
   thinkingEnabled,
   onThinkingChunk,
   onContentChunk,
+  onContentReset,
   onToolStatus,
+  // Plan 002: fired once per (session × model × source) when the engine
+  // gates tools off for the active model. The consumer renders a UI-only
+  // notice; the event content never enters `messages` (avoids self-
+  // reference pathology where small models fixate on their disabled state).
+  onSessionNotice,
   signal,
   providerConfig = { provider: "custom", baseUrl: "", apiKey: "" },
   csrfToken = "",
@@ -475,6 +557,10 @@ export async function runChatSession({
   mcpServers,
   history,
   maxContextTokens,
+  // Plan 002: populated model list from listModels() so the engine can
+  // resolve the active model's capability without re-fetching. The
+  // consumer (Chatbox.jsx) already maintains this list for the dropdown.
+  modelList = [],
 
   // Extension points (all optional — defaults produce a generic chatbox)
   systemPromptBuilder = buildGenericSystemMessage,
@@ -503,10 +589,41 @@ export async function runChatSession({
     rejectedPatches: [],
   };
 
+  // Plan 002: resolve model tool-capability before building the system
+  // prompt. Determines whether to pass tools to the adapter, which system-
+  // prompt variant to use, and whether to fire a session notice.
+  const capability = resolveModelCapability(model, modelList, providerConfig?.provider);
+  // Engine treats tools as gated when the model is unsupported, OR when
+  // the model is unknown for ollama (signal-less but worth being safe).
+  // Custom-unknown stays tools-on per R5.
+  const toolsGated =
+    capability === "unsupported" ||
+    (capability === "unknown" && providerConfig?.provider === "ollama");
+
   let messages =
     Array.isArray(history) && history.length > 0
       ? [...history]
-      : [systemPromptBuilder()];
+      : [systemPromptBuilder({ toolsAvailable: !toolsGated })];
+
+  // Fire the session notice once per turn when gated. Consumer dedups
+  // across turns within the same browser session.
+  if (toolsGated && typeof onSessionNotice === "function") {
+    // Look up the display name from the model list when available.
+    const modelEntry = Array.isArray(modelList)
+      ? modelList.find((m) => m?.name === model)
+      : null;
+    const displayName = modelEntry?.displayName || model;
+    onSessionNotice({
+      type: "tools_disabled",
+      model,
+      displayName,
+      provider: providerConfig?.provider,
+      // `source` distinguishes registry-based gating from auto-learned
+      // overrides. For now (Unit 2 scope), the source is always the
+      // provider signal; Unit 3 will introduce the "auto-learned" source.
+      source: "provider-signal",
+    });
+  }
 
   const text = typeof prompt === "string" ? prompt : "";
 
@@ -535,12 +652,17 @@ export async function runChatSession({
   }
 
   // Select tools once per user message — stable across the entire chat loop.
-  const selectedTools = await selectToolsForPrompt(
-    typeof prompt === "string" ? prompt : "",
-    toolsByServer,
-    classificationByServer,
-    embeddingsByServer,
-  );
+  // When tools are gated off (Plan 002), pass an empty array to the adapter
+  // regardless of MCP discovery. Discovery still runs so MCP-related UI
+  // surfaces (server status, tool counts) stay accurate.
+  const selectedTools = toolsGated
+    ? []
+    : await selectToolsForPrompt(
+        typeof prompt === "string" ? prompt : "",
+        toolsByServer,
+        classificationByServer,
+        embeddingsByServer,
+      );
 
   try {
     messages.push({ role: "user", content: text });
@@ -549,11 +671,11 @@ export async function runChatSession({
       messages = trimConversation(messages, maxContextTokens);
     }
 
-    // Extension point: inject additional messages before first LLM call
-    // (e.g., file URL detection message for NRDS)
+    // Extension point: inject additional context before each LLM call.
+    // (e.g., dashboard state injection from ChatSidebar.)
     if (beforeFirstMessage) {
       const extra = beforeFirstMessage(text, messages);
-      if (extra) messages.push(extra);
+      messages = applyExtensionMessage(messages, extra);
     }
 
     const failedSigCounts = {};
@@ -570,18 +692,137 @@ export async function runChatSession({
 
       const message = getMessage(response);
       let toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+      // When tool calls came from the provider's structured field, the
+      // assistant content is already prose-only. When we extract inline
+      // tool calls from the text below, we capture the residual prose so
+      // the JSON doesn't leak into the user-visible message bubble or the
+      // conversation history.
+      let inlineResidualContent = null;
 
       if (!toolCalls.length) {
         const assistantContent = typeof message.content === "string" ? message.content : "";
-        toolCalls = extractInlineToolCalls(assistantContent);
+        const { calls, residualContent } = extractInlineToolCallsWithResidual(assistantContent);
+        if (calls.length) {
+          toolCalls = calls;
+          inlineResidualContent = residualContent;
+        }
       }
 
       // No tool calls → return final text response
       if (!toolCalls.length) {
-        const assistantText = stripThinkTags(
+        let assistantText = stripThinkTags(
           typeof message.content === "string" ? message.content : "",
         );
-        messages.push({ role: "assistant", content: assistantText });
+        // Defensive: even after stripThinkTags, the model may have emitted
+        // tool-call-shaped JSON (e.g., {"tool": "x", "action": "y"}) with
+        // a key combination that didn't structurally match a real tool call.
+        const toolShape = detectAndStripToolShapedJson(assistantText);
+        const isRefusal = looksLikeToolRefusal(assistantText);
+
+        // Tool-incapable model recovery path: when a model can't reliably
+        // use the tools we offered (it either emits raw tool-call-shaped
+        // JSON OR refuses with "I am a tool-using AI assistant..."), retry
+        // the same request without the tools list so it answers from its
+        // own knowledge. Surface a non-blocking UI notice so the user knows
+        // the model couldn't use tools.
+        const offeredTools = Array.isArray(selectedTools) && selectedTools.length > 0;
+        if (offeredTools && (toolShape.hadToolShapedJson || isRefusal)) {
+          // Clear streaming buffers so the misleading first-attempt text
+          // doesn't flash before the retry's stream replaces it.
+          onContentReset?.();
+
+          // Plan 002: record a failure observation. After N=2 consecutive
+          // observations for this (provider, model), the override is
+          // persisted and future calls skip the wasted refusal turn.
+          recordFailure(providerConfig?.provider, model);
+
+          // Plan 002: surface the notice via onSessionNotice (UI-only) —
+          // do NOT push a system message into `messages`. Pushing it
+          // would (a) violate strict-alternation on Ollama Cloud and
+          // (b) cause smaller models to fixate on their own disabled
+          // state in subsequent turns. Plan 001's earlier draft pushed
+          // the notice into messages; Plan 002 supersedes that.
+          if (typeof onSessionNotice === "function") {
+            const modelEntry = Array.isArray(modelList)
+              ? modelList.find((m) => m?.name === model)
+              : null;
+            const displayName = modelEntry?.displayName || model;
+            onSessionNotice({
+              type: "tools_disabled",
+              model,
+              displayName,
+              provider: providerConfig?.provider,
+              source: "auto-learned",
+            });
+          }
+
+          let retryResponse;
+          try {
+            retryResponse = await streamWithAdapter({
+              messages,
+              tools: [], // retry without tools
+              model,
+              thinkingEnabled,
+              onThinkingChunk,
+              onContentChunk,
+              providerConfig,
+              csrfToken,
+              signal,
+            });
+          } catch (retryErr) {
+            // If the retry itself fails, fall through to surfacing the
+            // sanitized first attempt with a fallback message rather than
+            // crashing the turn.
+            retryResponse = null;
+          }
+
+          if (retryResponse) {
+            const retryMessage = getMessage(retryResponse);
+            assistantText = stripThinkTags(
+              typeof retryMessage.content === "string" ? retryMessage.content : "",
+            );
+            // Belt-and-suspenders: if the retry ALSO emits tool-shaped
+            // JSON (model is fundamentally confused), strip and fall back.
+            const retryShape = detectAndStripToolShapedJson(assistantText);
+            if (retryShape.hadToolShapedJson) {
+              assistantText = retryShape.stripped.trim()
+                || "I couldn't produce a useful answer for this request. Could you rephrase?";
+            }
+          } else {
+            assistantText = "I couldn't reach the model to answer without tools. Try again, or switch to a tool-capable model.";
+          }
+
+          messages.push({ role: "assistant", content: assistantText, ...(toolsGated ? { _toolsGated: true } : {}) });
+          return {
+            assistantText,
+            queryResult: state.lastQueryResult
+              ? { data: state.lastQueryResult, sql: state.lastQuerySQL }
+              : undefined,
+            visualizations: state.pendingVisualizations.length > 0
+              ? state.pendingVisualizations
+              : undefined,
+            layerUpdates: state.pendingLayerUpdates.length > 0
+              ? state.pendingLayerUpdates
+              : undefined,
+            patches: state.pendingPatches.length > 0
+              ? state.pendingPatches
+              : undefined,
+            rejectedPatches: state.rejectedPatches.length > 0
+              ? state.rejectedPatches
+              : undefined,
+            messages,
+            perServer,
+          };
+        }
+
+        // No retry needed (no tools were offered, OR the model gave a
+        // legitimate non-tool answer). If tool-shaped JSON snuck through,
+        // strip it and use the residual / fallback.
+        if (toolShape.hadToolShapedJson) {
+          assistantText = toolShape.stripped.trim()
+            || "I tried to use a tool but couldn't complete the request. Could you rephrase?";
+        }
+        messages.push({ role: "assistant", content: assistantText, ...(toolsGated ? { _toolsGated: true } : {}) });
         return {
           assistantText,
           queryResult: state.lastQueryResult
@@ -606,7 +847,11 @@ export async function runChatSession({
 
       messages.push({
         role: "assistant",
-        content: stripThinkTags(typeof message.content === "string" ? message.content : ""),
+        content: stripThinkTags(
+          inlineResidualContent !== null
+            ? inlineResidualContent
+            : (typeof message.content === "string" ? message.content : ""),
+        ),
         tool_calls: toolCalls,
       });
 
@@ -617,6 +862,17 @@ export async function runChatSession({
         { toolCategories, beforeToolExecution, toolErrorCheck, afterToolExecution },
       );
       onToolStatus?.(null);
+
+      // Plan 002 — auto-learn signal: a turn that successfully called
+      // tools (even tools that returned domain {error} envelopes — those
+      // count as success because the model used the tool correctly)
+      // resets the in-session consecutive-failure counter for this
+      // (provider, model). Hard adapter/transport errors leave the
+      // counter intact; the next reactive-detection observation will
+      // increment it normally.
+      if (!hadError) {
+        resetFailureCounter(providerConfig?.provider, model);
+      }
 
       // Extension point: early return for terminal results
       if (!hadError && earlyReturnCheck) {
@@ -650,18 +906,41 @@ export async function runChatSession({
         // the LLM gets one chance to self-correct via the normal loop.
         if (MAX_TOOL_REPAIR_ATTEMPTS <= 0) {
           if (repeatedSignature && repairMessageBuilder) {
-            messages.push(repairMessageBuilder(errorMsg, text, repeatedSignature));
+            // Defensive: if a caller's builder returns a role: "system"
+            // message it would break strict alternation on providers like
+            // Ollama Cloud. Route through applyExtensionMessage so the
+            // content is merged into a trailing user turn instead.
+            messages = applyExtensionMessage(
+              messages,
+              repairMessageBuilder(errorMsg, text, repeatedSignature),
+            );
           } else {
-            messages.push({ role: "user", content: `Tool error: ${errorMsg}. Please try a different approach.` });
+            // _internal: true marks this as a protocol message the LLM
+            // needs to see for retry context, but the UI must hide. Without
+            // the flag, ChatLog renders this as a fake user-typed bubble
+            // saying "Tool error: ...", which looks like the user did
+            // something they didn't.
+            messages.push({
+              role: "user",
+              content: `Tool error: ${errorMsg}. Please try a different approach.`,
+              _internal: true,
+            });
           }
           continue;
         }
 
         for (let attempt = 1; attempt <= MAX_TOOL_REPAIR_ATTEMPTS; attempt += 1) {
           if (repairMessageBuilder) {
-            messages.push(repairMessageBuilder(errorMsg, text, repeatedSignature));
+            messages = applyExtensionMessage(
+              messages,
+              repairMessageBuilder(errorMsg, text, repeatedSignature),
+            );
           } else {
-            messages.push({ role: "user", content: `Tool error: ${errorMsg}. Please fix and try again.` });
+            messages.push({
+              role: "user",
+              content: `Tool error: ${errorMsg}. Please fix and try again.`,
+              _internal: true,
+            });
           }
 
           let repairResponse;
@@ -677,8 +956,15 @@ export async function runChatSession({
 
           const repairMessage = getMessage(repairResponse);
           let repairCalls = Array.isArray(repairMessage.tool_calls) ? repairMessage.tool_calls : [];
+          let repairInlineResidual = null;
           if (!repairCalls.length) {
-            repairCalls = extractInlineToolCalls(typeof repairMessage.content === "string" ? repairMessage.content : "");
+            const { calls, residualContent } = extractInlineToolCallsWithResidual(
+              typeof repairMessage.content === "string" ? repairMessage.content : "",
+            );
+            if (calls.length) {
+              repairCalls = calls;
+              repairInlineResidual = residualContent;
+            }
           }
           if (!repairCalls.length) {
             lastErr = "Model did not return tool_calls; it responded with text instead.";
@@ -687,7 +973,11 @@ export async function runChatSession({
 
           messages.push({
             role: "assistant",
-            content: stripThinkTags(typeof repairMessage.content === "string" ? repairMessage.content : ""),
+            content: stripThinkTags(
+              repairInlineResidual !== null
+                ? repairInlineResidual
+                : (typeof repairMessage.content === "string" ? repairMessage.content : ""),
+            ),
             tool_calls: repairCalls,
           });
 

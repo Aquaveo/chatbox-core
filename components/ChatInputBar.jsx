@@ -4,12 +4,19 @@ import ContextUsageIndicator from "./ContextUsageIndicator";
 
 const InputSection = styled.section`
   border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: ${({ theme }) => theme.radius.xl};
+  border-radius: ${({ theme }) => theme.radius.lg};
   background: ${({ theme }) => theme.colors.surfaceInput};
   padding: ${({ theme }) => theme.spacing.md};
   display: flex;
   flex-direction: column;
   gap: ${({ theme }) => theme.spacing.sm};
+`;
+
+const ModelRow = styled.div`
+  display: flex;
+  align-items: center;
+  gap: ${({ theme }) => theme.spacing.sm};
+  padding: 0 ${({ theme }) => theme.spacing.xs};
 `;
 
 const Textarea = styled.textarea`
@@ -69,18 +76,47 @@ const PillButton = styled.button`
   }
 `;
 
-const ModelSelect = styled.select`
+const ModelSelectWrap = styled.label`
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radius.full};
-  padding: 0.3rem 0.6rem;
+  padding: 0.15rem 0.5rem 0.15rem 0.55rem;
+  flex: 1 1 auto;
+  min-width: 0;
+  background: transparent;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+
+  &:hover {
+    border-color: ${({ theme }) => theme.colors.borderHover || theme.colors.primary};
+  }
+
+  &:focus-within {
+    border-color: ${({ theme }) => theme.colors.primary};
+  }
+`;
+
+const ProviderIconBadge = styled.span`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: ${({ theme }) => theme.colors.textMuted};
+`;
+
+const ModelSelect = styled.select`
+  border: none;
+  background: transparent;
+  padding: 0.2rem 0;
   font-size: ${({ theme }) => theme.fontSize.sm};
   font-weight: 600;
   color: ${({ theme }) => theme.colors.textMuted};
-  background: transparent;
   cursor: pointer;
   outline: none;
-  min-width: 140px;
   flex: 1 1 auto;
+  min-width: 0;
   text-overflow: ellipsis;
 
   &:disabled {
@@ -111,23 +147,64 @@ const Badge = styled.span`
   line-height: 1;
 `;
 
-const ProviderGlyphs = {
-  openai: "AI",
-  anthropic: "An",
-  ollama: "Ll",
-  custom: "Cu",
-};
 const ProviderLabels = {
   openai: "OpenAI",
   anthropic: "Anthropic",
   ollama: "Ollama",
   custom: "Custom",
 };
-function providerGlyph(provider) {
-  return ProviderGlyphs[provider] ?? "Lo";
-}
 function providerLabel(provider) {
   return ProviderLabels[provider] ?? "Local";
+}
+
+const OllamaIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M8 4v3" />
+    <path d="M16 4v3" />
+    <path d="M7 13c0-3 2.2-5 5-5s5 2 5 5v4c0 2-1.5 3.5-3.5 3.5h-3C8.5 20.5 7 19 7 17v-4z" />
+    <circle cx="10" cy="14" r="0.6" fill="currentColor" />
+    <circle cx="14" cy="14" r="0.6" fill="currentColor" />
+  </svg>
+);
+
+const OpenAIIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <path d="M12 2l1.6 6.4L20 10l-6.4 1.6L12 18l-1.6-6.4L4 10l6.4-1.6L12 2z" />
+  </svg>
+);
+
+const AnthropicIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <path d="M12 3L3 21h3.6l1.5-3.6h7.8L17.4 21H21L12 3zm-2.6 11.5L12 8.6l2.6 5.9H9.4z" />
+  </svg>
+);
+
+const CustomIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <rect x="6" y="6" width="12" height="12" rx="1.5" />
+    <line x1="9" y1="2" x2="9" y2="5" />
+    <line x1="15" y1="2" x2="15" y2="5" />
+    <line x1="9" y1="19" x2="9" y2="22" />
+    <line x1="15" y1="19" x2="15" y2="22" />
+    <line x1="2" y1="9" x2="5" y2="9" />
+    <line x1="2" y1="15" x2="5" y2="15" />
+    <line x1="19" y1="9" x2="22" y2="9" />
+    <line x1="19" y1="15" x2="22" y2="15" />
+  </svg>
+);
+
+function ProviderIcon({ provider }) {
+  switch (provider) {
+    case "ollama":
+      return <OllamaIcon />;
+    case "openai":
+      return <OpenAIIcon />;
+    case "anthropic":
+      return <AnthropicIcon />;
+    case "custom":
+    default:
+      return <CustomIcon />;
+  }
 }
 
 const SendButton = styled.button`
@@ -179,6 +256,13 @@ const StopIcon = () => (
   </svg>
 );
 
+const SettingsIcon = () => (
+  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <circle cx="12" cy="12" r="3" />
+    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+  </svg>
+);
+
 export default function ChatInputBar({
   input,
   setInput,
@@ -222,9 +306,33 @@ export default function ChatInputBar({
 
   return (
     <InputSection>
+      <ModelRow>
+        <ModelSelectWrap title={`${providerLabel(providerConfig?.provider)} · ${selectedModel || "no model"}`}>
+          <ProviderIconBadge>
+            <ProviderIcon provider={providerConfig?.provider} />
+          </ProviderIconBadge>
+          <ModelSelect
+            value={selectedModel}
+            onChange={(e) => onModelChange(e.target.value)}
+            disabled={loading || loadingModels || !availableModels.length}
+            aria-label={`Model — current provider: ${providerLabel(providerConfig?.provider)}`}
+          >
+            {availableModels.length ? (
+              availableModels.map((m) => (
+                <option key={m.name} value={m.name}>
+                  {m.capabilities?.includes("thinking") ? "💡 " : ""}{m.name}
+                </option>
+              ))
+            ) : (
+              <option value="">{loadingModels ? "Loading..." : "No models"}</option>
+            )}
+          </ModelSelect>
+        </ModelSelectWrap>
+        <ContextUsageIndicator used={contextUsage.used} total={contextUsage.total} />
+      </ModelRow>
       <Textarea
         ref={textareaRef}
-        placeholder={`Message ${selectedModel || "assistant"}...`}
+        placeholder="Send a message…"
         rows={1}
         value={input}
         onChange={handleInput}
@@ -243,22 +351,6 @@ export default function ChatInputBar({
             <ThinkingIcon />
             Thinking
           </PillButton>
-          <ModelSelect
-            value={selectedModel}
-            onChange={(e) => onModelChange(e.target.value)}
-            disabled={loading || loadingModels || !availableModels.length}
-          >
-            {availableModels.length ? (
-              availableModels.map((m) => (
-                <option key={m.name} value={m.name}>
-                  {m.capabilities?.includes("thinking") ? "\uD83D\uDCA1 " : ""}{m.name}
-                </option>
-              ))
-            ) : (
-              <option value="">{loadingModels ? "Loading..." : "No models"}</option>
-            )}
-          </ModelSelect>
-          <ContextUsageIndicator used={contextUsage.used} total={contextUsage.total} />
           <IconPillButton
             type="button"
             $active={showProviderPanel}
@@ -266,20 +358,20 @@ export default function ChatInputBar({
             title={`LLM provider: ${providerLabel(providerConfig?.provider)}`}
             aria-label={`LLM provider settings — current: ${providerLabel(providerConfig?.provider)}`}
           >
-            {providerGlyph(providerConfig?.provider)}
+            <SettingsIcon />
           </IconPillButton>
+          {onOpenMcpPanel && (
+            <IconPillButton
+              type="button"
+              onClick={onOpenMcpPanel}
+              title="Manage MCP servers"
+              aria-label={`Manage MCP servers${mcpServerCount > 0 ? ` (${mcpServerCount} configured)` : ""}`}
+            >
+              <McpIcon />
+              {mcpServerCount > 0 && <Badge>{mcpServerCount}</Badge>}
+            </IconPillButton>
+          )}
         </Toggles>
-        {onOpenMcpPanel && (
-          <IconPillButton
-            type="button"
-            onClick={onOpenMcpPanel}
-            title="Manage MCP servers"
-            aria-label={`Manage MCP servers${mcpServerCount > 0 ? ` (${mcpServerCount} configured)` : ""}`}
-          >
-            <McpIcon />
-            {mcpServerCount > 0 && <Badge>{mcpServerCount}</Badge>}
-          </IconPillButton>
-        )}
         {loading ? (
           <SendButton type="button" $stop onClick={onStop} aria-label="Stop generation">
             <StopIcon />
