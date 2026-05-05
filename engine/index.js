@@ -251,6 +251,12 @@ export async function connectMcpServers(mcpServers) {
   const connections = [];
   const tools = [];
   const toolServerMap = new Map();
+  // Plan 003 / Unit A1 — tag capture for the host UI's renderable-tool
+  // banner trigger. Map<toolName, string[]>; first-wins on tool-name
+  // collision across servers (mirrors `toolServerMap` semantics — a
+  // server author whose tool name shadows an earlier server's tool
+  // also has its tags shadowed).
+  const toolTagsByName = new Map();
   const toolsByServer = {};
   const classificationByServer = {};
   const perServer = [];
@@ -294,6 +300,15 @@ export async function connectMcpServers(mcpServers) {
         } else {
           toolServerMap.set(tool.name, i);
         }
+
+        // Unit A1 — first-wins tag capture. Same guard as toolServerMap
+        // so the two maps stay in lockstep on collision. No second
+        // console.warn — the toolServerMap warning above already names
+        // the offending tool; emitting a duplicate would just be noise.
+        if (!toolTagsByName.has(tool.name)) {
+          const tags = Array.isArray(tool?.tags) ? [...tool.tags] : [];
+          toolTagsByName.set(tool.name, tags);
+        }
       }
 
       classificationByServer[serverId] = classifyServerTools(toolsByServer[serverId]);
@@ -327,7 +342,7 @@ export async function connectMcpServers(mcpServers) {
     }
   }
 
-  return { connections, tools, toolServerMap, toolsByServer, classificationByServer, perServer };
+  return { connections, tools, toolServerMap, toolTagsByName, toolsByServer, classificationByServer, perServer };
 }
 
 async function closeAllMcpConnections(connections) {
@@ -428,6 +443,20 @@ export async function processToolCalls(
     }
 
     const toolResult = await executeTool(toolName, args, connections, toolServerMap);
+
+    // Unit A1 / K14 — append per-turn tool-call entry. Used by the host
+    // UI to evaluate the dispatch-feedback banner trigger (was a
+    // renderable-tagged tool called this turn? did at least one such
+    // call return something other than a domain-error envelope?).
+    // Caller (runChatSession) resets `state.toolCallsThisTurn = []` at
+    // the top of every turn iteration; this site only appends.
+    if (Array.isArray(state?.toolCallsThisTurn)) {
+      const hadDomainError =
+        toolResult !== null &&
+        typeof toolResult === "object" &&
+        typeof toolResult.error === "string";
+      state.toolCallsThisTurn.push({ toolName, hadDomainError });
+    }
 
     // Categorize tool result via injected categories
     if (toolResult && typeof toolResult === "object" && toolCategories) {
@@ -587,6 +616,12 @@ export async function runChatSession({
     // instead of a {patch_update}. Surfaced in the runChatSession return
     // so the host chatbox can categorize into user-facing copy buckets.
     rejectedPatches: [],
+    // Plan 003 / Unit A1 (K14) — per-turn tool-call history surfaced to
+    // the host UI for the dispatch-feedback banner trigger. Appended by
+    // `processToolCalls`; reset at the top of every turn iteration in
+    // the loop below. Each entry: {toolName: string, hadDomainError: boolean}
+    // where hadDomainError === (typeof toolResult.error === "string").
+    toolCallsThisTurn: [],
   };
 
   // Plan 002: resolve model tool-capability before building the system
@@ -633,7 +668,7 @@ export async function runChatSession({
       ? [{ url: mcpServerUrl, name: "Default" }]
       : [];
 
-  const { connections, tools, toolServerMap, toolsByServer, classificationByServer, perServer } =
+  const { connections, tools, toolServerMap, toolTagsByName, toolsByServer, classificationByServer, perServer } =
     await connectMcpServers(servers);
 
   // Build embeddings for large full-catalog servers (lazy, cached across messages).
@@ -682,8 +717,21 @@ export async function runChatSession({
 
     while (true) {
       if (signal?.aborted) {
-        return { assistantText: "", messages, aborted: true, perServer };
+        return {
+          assistantText: "",
+          messages,
+          aborted: true,
+          perServer,
+          toolTagsByName,
+          toolCallsThisTurn: state.toolCallsThisTurn,
+        };
       }
+
+      // Plan 003 / Unit A1 (K14) — reset per-turn tool-call history at
+      // the top of every loop iteration. processToolCalls appends; the
+      // host UI consumes the array as a snapshot of "what happened this
+      // turn" for banner-trigger evaluation.
+      state.toolCallsThisTurn = [];
 
       const response = await streamWithAdapter({
         messages, tools: selectedTools, model, thinkingEnabled,
@@ -810,6 +858,10 @@ export async function runChatSession({
             rejectedPatches: state.rejectedPatches.length > 0
               ? state.rejectedPatches
               : undefined,
+            // Plan 003 / Unit A1 — host-UI banner inputs. Always returned
+            // (even empty) so consumers can rely on shape stability.
+            toolTagsByName,
+            toolCallsThisTurn: state.toolCallsThisTurn,
             messages,
             perServer,
           };
@@ -840,6 +892,10 @@ export async function runChatSession({
           rejectedPatches: state.rejectedPatches.length > 0
             ? state.rejectedPatches
             : undefined,
+          // Plan 003 / Unit A1 — host-UI banner inputs. Always returned
+          // (even empty) so consumers can rely on shape stability.
+          toolTagsByName,
+          toolCallsThisTurn: state.toolCallsThisTurn,
           messages,
           perServer,
         };
@@ -877,7 +933,12 @@ export async function runChatSession({
       // Extension point: early return for terminal results
       if (!hadError && earlyReturnCheck) {
         const earlyResult = earlyReturnCheck(state, messages);
-        if (earlyResult) return { ...earlyResult, perServer };
+        if (earlyResult) return {
+          ...earlyResult,
+          perServer,
+          toolTagsByName,
+          toolCallsThisTurn: state.toolCallsThisTurn,
+        };
       }
 
       // Visualizations are accumulated in state.pendingVisualizations but do NOT
@@ -995,7 +1056,12 @@ export async function runChatSession({
 
           if (!hadError && earlyReturnCheck) {
             const repairEarlyResult = earlyReturnCheck(state, messages);
-            if (repairEarlyResult) return { ...repairEarlyResult, perServer };
+            if (repairEarlyResult) return {
+              ...repairEarlyResult,
+              perServer,
+              toolTagsByName,
+              toolCallsThisTurn: state.toolCallsThisTurn,
+            };
           }
 
           if (!hadError) {
