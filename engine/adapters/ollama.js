@@ -43,7 +43,13 @@ export async function streamChat({
       }
     } catch { /* not JSON — fall through to legacy wrapping */ }
     if (upstreamMessage) {
-      throw new Error(`Ollama (${model}): ${upstreamMessage}`);
+      const refMatch = upstreamMessage.match(/\s*\(ref:\s*([^)]+)\)\s*$/);
+      let displayMessage = upstreamMessage;
+      if (refMatch) {
+        displayMessage = upstreamMessage.slice(0, refMatch.index).trimEnd();
+        console.info(`[Ollama error ref] ${refMatch[1].trim()} — model=${model}`);
+      }
+      throw new Error(`Ollama (${model}): ${displayMessage}`);
     }
     throw new Error(`Ollama proxy returned ${response.status}: ${errText}`);
   }

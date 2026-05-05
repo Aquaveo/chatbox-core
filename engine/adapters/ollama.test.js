@@ -10,9 +10,15 @@
  * non-JSON failures keep the original wrapping.
  */
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { streamChat } from "./ollama.js";
+
+let infoSpy;
+
+beforeEach(() => {
+  infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+});
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -47,6 +53,54 @@ describe("ollama streamChat — error rendering", () => {
     ).rejects.toThrow(
       /kimi-k2\.6.*this model requires a subscription.*https:\/\/ollama\.com\/upgrade/s,
     );
+  });
+
+  it("strips '(ref: <uuid>)' from the displayed message and emits it to console.info", async () => {
+    global.fetch = mockErrorResponse({
+      status: 403,
+      body: JSON.stringify({
+        error:
+          "this model requires a subscription, upgrade for access: https://ollama.com/upgrade (ref: 0fdeafd6-1121-4681-aa7c-b7ce5cef6b31)",
+      }),
+    });
+
+    let caught;
+    try {
+      await streamChat({
+        provider: "ollama",
+        baseUrl: "https://ollama.com",
+        apiKey: "k",
+        model: "kimi-k2.6",
+        messages: [],
+      });
+    } catch (e) {
+      caught = e;
+    }
+
+    expect(caught.message).not.toMatch(/\(ref:/);
+    expect(caught.message).toMatch(/https:\/\/ollama\.com\/upgrade$/);
+    expect(infoSpy).toHaveBeenCalledTimes(1);
+    const logged = infoSpy.mock.calls[0].join(" ");
+    expect(logged).toContain("0fdeafd6-1121-4681-aa7c-b7ce5cef6b31");
+    expect(logged).toContain("kimi-k2.6");
+  });
+
+  it("does not emit a console.info when no ref token is present", async () => {
+    global.fetch = mockErrorResponse({
+      status: 403,
+      body: JSON.stringify({ error: "model not found" }),
+    });
+
+    await expect(
+      streamChat({
+        provider: "ollama",
+        baseUrl: "https://ollama.com",
+        apiKey: "k",
+        model: "llama3.2",
+        messages: [],
+      }),
+    ).rejects.toThrow(/Ollama \(llama3\.2\): model not found/);
+    expect(infoSpy).not.toHaveBeenCalled();
   });
 
   it("does not start with the legacy 'Ollama proxy returned' wrapping when upstream JSON is parseable", async () => {
