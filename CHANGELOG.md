@@ -8,6 +8,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05-04
+
+Adds the dispatch-feedback contract: hosts get authoritative ground
+truth about what the engine actually dispatched per tool call, and a
+new state surface for tag-based UI affordances. Additive on the
+public API — consumers that ignore unknown keys are unaffected.
+
+### Features
+
+- **Engine — `_engine_dispatched` field on tool results.** Every
+  object-shaped tool result the engine forwards to the LLM gains a
+  `_engine_dispatched: [<uuid>, ...]` field naming the envelope UUIDs
+  *this* tool call dispatched (per-call delta, not cumulative). The
+  LLM uses this as in-band ground truth to decide whether a tile was
+  actually rendered. Empty array means the call returned data only.
+  Skipped silently for non-object/null results. Pre-existing key in
+  the source result is overwritten with the engine's authoritative
+  value, with a `console.warn`.
+- **Engine — `toolTagsByName` state surface.** During
+  `connectMcpServers`, the engine now captures the `tags` field from
+  each MCP tool's `tools/list` entry into a `Map<toolName, string[]>`
+  exposed on returned engine state. Hosts can use this to evaluate
+  per-turn tag-based UI rules without re-reading the server response.
+  First-wins on tool-name collision across servers, matching the
+  existing `toolServerMap` collision behavior.
+- **Engine — `state.toolCallsThisTurn` per-turn list.**
+  `processToolCalls` now appends one entry per tool call —
+  `{toolName, hadDomainError}` — into a turn-scoped list on engine
+  state. Callers reset the array at the top of each turn iteration.
+  Enables hosts to render per-turn affordances (such as the
+  dispatch-feedback banner) keyed off whether a tagged tool was
+  called and whether its result carried a domain error.
+- **Engine — structured truncation across all envelope kinds.** The
+  oversized-result compact summary now preserves
+  `_engine_dispatched` for `visualization`, `layer_update`, and
+  `patch_update` envelopes. Fixes a pre-existing latent bug where
+  `layer_update` and `patch_update` truncation fell through to a
+  naive string-slice that destroyed their structure in the
+  LLM-visible message.
+
+### Engine-reserved tool-result keys
+
+Tool authors should treat the following top-level keys as
+engine-reserved on tool results. The engine may inject, mutate, or
+overwrite them at result-forwarding time. Choose different names
+when designing your own tool surfaces.
+
+- `_engine_dispatched` — UUIDs dispatched by the call (added 0.3.0)
+- `_truncated` — boolean, set when the result was compact-summarized
+- `_originalChars` — char count of the pre-truncation JSON
+- `_toolsGated` — used by capability-gating extensions
+- `_raw` — used by extension messages
+
 ## [0.2.0-beta.0] — 2026-05-02
 
 First prerelease publish to npm under `@aquaveo/chatbox-core`. Promoted

@@ -200,6 +200,34 @@ const extensions = {
 <Chatbox ollamaHost={host} engineExtensions={extensions} />
 ```
 
+## Tool-author conventions
+
+### Engine-reserved tool-result keys
+
+The engine writes a small set of metadata keys on every object-shaped
+tool result it forwards back to the LLM. Tool authors building MCP
+servers consumed by `@aquaveo/chatbox-core` should treat these top-level
+keys as reserved — choose different names for any tool-specific data.
+
+| Key | Set by | Meaning |
+|-----|--------|---------|
+| `_engine_dispatched` | engine, every call | UUIDs of envelopes this tool call dispatched |
+| `_truncated` | engine, oversized results | Result was compact-summarized for the LLM |
+| `_originalChars` | engine, oversized results | Char count of the pre-truncation JSON |
+| `_toolsGated` | capability-gating extensions | Tools the engine hid behind a model capability filter |
+| `_raw` | extension messages | Raw payload preserved alongside a redacted message |
+
+If a tool result contains a reserved key the engine wants to write, the
+engine overwrites it with the engine's authoritative value and emits a
+`console.warn` naming the offending tool. The contract is one-directional:
+the engine wins because the LLM contract requires the field to mean
+exactly one thing.
+
+`_engine_dispatched` is informational only. Hosts that want to use it as
+a system-prompt anchor (e.g. "only claim a visualization was created if
+it appears in `_engine_dispatched`") add the instruction to their own
+prompt — the engine ships no domain-specific prompt text.
+
 ## Subpath Imports
 
 ```js

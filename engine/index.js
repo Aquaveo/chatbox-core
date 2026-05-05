@@ -251,6 +251,12 @@ export async function connectMcpServers(mcpServers) {
   const connections = [];
   const tools = [];
   const toolServerMap = new Map();
+  // Plan 003 / Unit A1 — tag capture for the host UI's renderable-tool
+  // banner trigger. Map<toolName, string[]>; first-wins on tool-name
+  // collision across servers (mirrors `toolServerMap` semantics — a
+  // server author whose tool name shadows an earlier server's tool
+  // also has its tags shadowed).
+  const toolTagsByName = new Map();
   const toolsByServer = {};
   const classificationByServer = {};
   const perServer = [];
@@ -294,6 +300,15 @@ export async function connectMcpServers(mcpServers) {
         } else {
           toolServerMap.set(tool.name, i);
         }
+
+        // Unit A1 — first-wins tag capture. Same guard as toolServerMap
+        // so the two maps stay in lockstep on collision. No second
+        // console.warn — the toolServerMap warning above already names
+        // the offending tool; emitting a duplicate would just be noise.
+        if (!toolTagsByName.has(tool.name)) {
+          const tags = Array.isArray(tool?.tags) ? [...tool.tags] : [];
+          toolTagsByName.set(tool.name, tags);
+        }
       }
 
       classificationByServer[serverId] = classifyServerTools(toolsByServer[serverId]);
@@ -327,7 +342,7 @@ export async function connectMcpServers(mcpServers) {
     }
   }
 
-  return { connections, tools, toolServerMap, toolsByServer, classificationByServer, perServer };
+  return { connections, tools, toolServerMap, toolTagsByName, toolsByServer, classificationByServer, perServer };
 }
 
 async function closeAllMcpConnections(connections) {
@@ -429,6 +444,20 @@ export async function processToolCalls(
 
     const toolResult = await executeTool(toolName, args, connections, toolServerMap);
 
+    // Unit A1 / K14 — append per-turn tool-call entry. Used by the host
+    // UI to evaluate the dispatch-feedback banner trigger (was a
+    // renderable-tagged tool called this turn? did at least one such
+    // call return something other than a domain-error envelope?).
+    // Caller (runChatSession) resets `state.toolCallsThisTurn = []` at
+    // the top of every turn iteration; this site only appends.
+    if (Array.isArray(state?.toolCallsThisTurn)) {
+      const hadDomainError =
+        toolResult !== null &&
+        typeof toolResult === "object" &&
+        typeof toolResult.error === "string";
+      state.toolCallsThisTurn.push({ toolName, hadDomainError });
+    }
+
     // Categorize tool result via injected categories
     if (toolResult && typeof toolResult === "object" && toolCategories) {
       const errText = toolErrorCheck ? toolErrorCheck(toolResult) : null;
@@ -442,6 +471,15 @@ export async function processToolCalls(
         }
       }
     }
+
+    // Unit A2 / K2 — capture per-call envelope counts BEFORE the
+    // recognition block so the slice afterward yields exactly the UUIDs
+    // dispatched by THIS tool call (not cumulative across the turn).
+    // If the recognition block is reordered or split, this delta breaks
+    // silently — keep these reads adjacent to the pushes below.
+    const visBefore = state.pendingVisualizations.length;
+    const layerBefore = state.pendingLayerUpdates.length;
+    const patchBefore = state.pendingPatches.length;
 
     // Collect visualization specs from the ORIGINAL result (before truncation)
     if (toolResult && typeof toolResult === "object" && toolResult.visualization) {
@@ -474,23 +512,103 @@ export async function processToolCalls(
       });
     }
 
-    // Truncate large results before storing in conversation history
-    let resultContent = toolResult && typeof toolResult === "object"
-      ? JSON.stringify(toolResult)
+    // Unit A2 / K2 — compute the per-call delta. Each envelope kind
+    // contributes the UUIDs of envelopes added between visBefore↔now.
+    const dispatchedUuids = [
+      ...state.pendingVisualizations
+        .slice(visBefore)
+        .map((v) => v?.uuid)
+        .filter((u) => typeof u === "string"),
+      ...state.pendingLayerUpdates
+        .slice(layerBefore)
+        .map((l) => l?.uuid)
+        .filter((u) => typeof u === "string"),
+      ...state.pendingPatches
+        .slice(patchBefore)
+        .map((p) => p?.uuid)
+        .filter((u) => typeof u === "string"),
+    ];
+
+    // Unit A2 / K1 + K5 + K15 — inject `_engine_dispatched` only on
+    // object-shaped results; skip silently for null/scalar. K5: if the
+    // tool result already carries the reserved key, log a warning and
+    // overwrite with the engine's authoritative value (collision check
+    // fires before the truncation pass).
+    //
+    // Build a forwarded wrapper rather than mutating `toolResult` so
+    // downstream consumers that observe the original shape — notably
+    // `afterToolExecution` hooks and any extension that reads the
+    // tool result post-execution — see the unmodified server response.
+    const isObjResult = toolResult !== null && typeof toolResult === "object";
+    let resultForLlm = toolResult;
+    if (isObjResult) {
+      if (Object.prototype.hasOwnProperty.call(toolResult, "_engine_dispatched")) {
+        console.warn(
+          `[chatbox-core] Tool ${toolName} returned a reserved key ` +
+            `'_engine_dispatched' in its result. Overwriting with engine value.`,
+        );
+      }
+      // Spread + reassign drops the adversarial value if any, then sets
+      // the engine's authoritative value last (object-key insertion order
+      // makes the engine's value win even on engines that surface dupes).
+      resultForLlm = { ...toolResult, _engine_dispatched: dispatchedUuids };
+    }
+
+    // Truncate large results before storing in conversation history.
+    // Unit A2 / K3 — when the result exceeds MAX_TOOL_RESULT_CHARS,
+    // produce a structured compact summary that preserves
+    // `_engine_dispatched` regardless of envelope kind. This also fixes
+    // a pre-existing latent bug where `layer_update` and `patch_update`
+    // truncation fell through to a naive string-slice that destroyed
+    // their structure in the LLM-visible message.
+    let resultContent = isObjResult
+      ? JSON.stringify(resultForLlm)
       : String(toolResult ?? "");
 
     if (resultContent.length > MAX_TOOL_RESULT_CHARS) {
-      if (toolResult?.visualization) {
-        // Preserve visualization reference in a compact summary
-        resultContent = JSON.stringify({
-          visualization: { source: toolResult.visualization.source, vizType: toolResult.visualization.vizType },
-          _truncated: true,
-          _originalChars: resultContent.length,
-        });
+      const originalLen = resultContent.length;
+      if (isObjResult) {
+        // Build summary from the original toolResult so we can read
+        // envelope shapes; `_engine_dispatched` carries the engine's
+        // authoritative dispatchedUuids regardless of any adversarial
+        // value the source might have included.
+        let summary;
+        if (toolResult.visualization) {
+          summary = {
+            visualization: {
+              source: toolResult.visualization.source,
+              vizType: toolResult.visualization.vizType,
+              uuid: toolResult.visualization.uuid,
+            },
+          };
+        } else if (toolResult.layer_update) {
+          summary = {
+            layer_update: {
+              uuid: toolResult.layer_update.uuid,
+              action: toolResult.layer_update.action,
+            },
+          };
+        } else if (toolResult.patch_update) {
+          summary = {
+            patch_update: { uuid: toolResult.patch_update.uuid },
+          };
+        } else {
+          // Data-only oversized — preserve key shape, drop value bodies.
+          summary = {};
+          if (typeof toolResult.error === "string") {
+            summary.error = toolResult.error;
+          }
+        }
+        summary._engine_dispatched = dispatchedUuids;
+        summary._truncated = true;
+        summary._originalChars = originalLen;
+        resultContent = JSON.stringify(summary);
       } else {
-        const originalLen = resultContent.length;
-        resultContent = resultContent.slice(0, MAX_TOOL_RESULT_CHARS)
-          + `\n...[truncated, full result was ${originalLen} chars]`;
+        // K1 — non-object results never gain `_engine_dispatched`; keep
+        // the legacy string-slice fallback for scalar/null oversized.
+        resultContent =
+          resultContent.slice(0, MAX_TOOL_RESULT_CHARS) +
+          `\n...[truncated, full result was ${originalLen} chars]`;
       }
     }
 
@@ -587,6 +705,12 @@ export async function runChatSession({
     // instead of a {patch_update}. Surfaced in the runChatSession return
     // so the host chatbox can categorize into user-facing copy buckets.
     rejectedPatches: [],
+    // Plan 003 / Unit A1 (K14) — per-turn tool-call history surfaced to
+    // the host UI for the dispatch-feedback banner trigger. Appended by
+    // `processToolCalls`; reset at the top of every turn iteration in
+    // the loop below. Each entry: {toolName: string, hadDomainError: boolean}
+    // where hadDomainError === (typeof toolResult.error === "string").
+    toolCallsThisTurn: [],
   };
 
   // Plan 002: resolve model tool-capability before building the system
@@ -633,7 +757,7 @@ export async function runChatSession({
       ? [{ url: mcpServerUrl, name: "Default" }]
       : [];
 
-  const { connections, tools, toolServerMap, toolsByServer, classificationByServer, perServer } =
+  const { connections, tools, toolServerMap, toolTagsByName, toolsByServer, classificationByServer, perServer } =
     await connectMcpServers(servers);
 
   // Build embeddings for large full-catalog servers (lazy, cached across messages).
@@ -682,8 +806,21 @@ export async function runChatSession({
 
     while (true) {
       if (signal?.aborted) {
-        return { assistantText: "", messages, aborted: true, perServer };
+        return {
+          assistantText: "",
+          messages,
+          aborted: true,
+          perServer,
+          toolTagsByName,
+          toolCallsThisTurn: state.toolCallsThisTurn,
+        };
       }
+
+      // Plan 003 / Unit A1 (K14) — reset per-turn tool-call history at
+      // the top of every loop iteration. processToolCalls appends; the
+      // host UI consumes the array as a snapshot of "what happened this
+      // turn" for banner-trigger evaluation.
+      state.toolCallsThisTurn = [];
 
       const response = await streamWithAdapter({
         messages, tools: selectedTools, model, thinkingEnabled,
@@ -810,6 +947,10 @@ export async function runChatSession({
             rejectedPatches: state.rejectedPatches.length > 0
               ? state.rejectedPatches
               : undefined,
+            // Plan 003 / Unit A1 — host-UI banner inputs. Always returned
+            // (even empty) so consumers can rely on shape stability.
+            toolTagsByName,
+            toolCallsThisTurn: state.toolCallsThisTurn,
             messages,
             perServer,
           };
@@ -840,6 +981,10 @@ export async function runChatSession({
           rejectedPatches: state.rejectedPatches.length > 0
             ? state.rejectedPatches
             : undefined,
+          // Plan 003 / Unit A1 — host-UI banner inputs. Always returned
+          // (even empty) so consumers can rely on shape stability.
+          toolTagsByName,
+          toolCallsThisTurn: state.toolCallsThisTurn,
           messages,
           perServer,
         };
@@ -877,7 +1022,12 @@ export async function runChatSession({
       // Extension point: early return for terminal results
       if (!hadError && earlyReturnCheck) {
         const earlyResult = earlyReturnCheck(state, messages);
-        if (earlyResult) return { ...earlyResult, perServer };
+        if (earlyResult) return {
+          ...earlyResult,
+          perServer,
+          toolTagsByName,
+          toolCallsThisTurn: state.toolCallsThisTurn,
+        };
       }
 
       // Visualizations are accumulated in state.pendingVisualizations but do NOT
@@ -995,7 +1145,12 @@ export async function runChatSession({
 
           if (!hadError && earlyReturnCheck) {
             const repairEarlyResult = earlyReturnCheck(state, messages);
-            if (repairEarlyResult) return { ...repairEarlyResult, perServer };
+            if (repairEarlyResult) return {
+              ...repairEarlyResult,
+              perServer,
+              toolTagsByName,
+              toolCallsThisTurn: state.toolCallsThisTurn,
+            };
           }
 
           if (!hadError) {
