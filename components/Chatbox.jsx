@@ -29,6 +29,7 @@ import { sanitizeServerName, stripUrlCredentials } from "../helpers/url.js";
 import { buildMcpStatusMessage } from "../helpers/buildMcpStatusMessage.js";
 import { scheduleDispatchIfFresh } from "../helpers/scheduleDispatch.js";
 import { buildPatchEntries } from "../helpers/buildPatchEntries.js";
+import { _buildDispatchBanner } from "./dispatchBanner.js";
 import { getProviderConfig } from "../storage/llmProviderStorage.js";
 import ChatLog from "./ChatLog";
 import ChatInputBar from "./ChatInputBar";
@@ -716,6 +717,19 @@ export default function Chatbox({
       // bucket 2 signal.
       const whitelistWarning = _buildWhitelistWarning(result.rejectedPatches);
 
+      // Plan 003 D4 — structural dispatch-feedback banner. Triggers when a
+      // renderable-tagged tool was called this turn but no envelope was
+      // dispatched. Defense-in-depth alongside the system-prompt instruction
+      // (Plan 003 D3 — host-owned).
+      const dispatchBanner = _buildDispatchBanner({
+        toolCallsThisTurn: result.toolCallsThisTurn,
+        toolTagsByName: result.toolTagsByName,
+        visualizations: result.visualizations,
+        layerUpdates: result.layerUpdates,
+        patches: result.patches,
+        assistantText: result.assistantText,
+      });
+
       // Batch dispatch: ONE tethysdash:update-visualization event carrying
       // all surviving entries, scheduled via rAF alongside the layer-update
       // path. Per docs/solutions/logic-errors/stale-ref-batch-dispatch-*,
@@ -749,7 +763,7 @@ export default function Chatbox({
         ...prev,
         {
           role: "assistant",
-          content: collisionWarning + whitelistWarning + content,
+          content: dispatchBanner + collisionWarning + whitelistWarning + content,
           thinking: accumulatedThinking || "",
           plotlyFigure: result.plotlyFigure ?? inlinePlotly,
           mapConfig: result.mapConfig ?? null,
