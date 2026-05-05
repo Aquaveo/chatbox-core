@@ -35,6 +35,16 @@ export async function streamChat({
 
   if (!response.ok) {
     const errText = await response.text().catch(() => "Unknown error");
+    let upstreamMessage = null;
+    try {
+      const parsed = JSON.parse(errText);
+      if (parsed && typeof parsed.error === "string" && parsed.error) {
+        upstreamMessage = parsed.error;
+      }
+    } catch { /* not JSON — fall through to legacy wrapping */ }
+    if (upstreamMessage) {
+      throw new Error(`Ollama (${model}): ${upstreamMessage}`);
+    }
     throw new Error(`Ollama proxy returned ${response.status}: ${errText}`);
   }
 
