@@ -107,7 +107,7 @@ const Shell = styled.div`
   padding: 0.75rem;
   box-sizing: border-box;
   overflow: hidden;
-  justify-content: ${(props) => (props.$hasMessages ? "flex-start" : "flex-end")};
+  justify-content: ${(props) => (props.$hasMessages ? "flex-start" : "flex-start")};
   align-items: ${(props) => (props.$hasMessages ? "stretch" : "center")};
 `;
 
@@ -118,8 +118,10 @@ const WelcomeInputWrapper = styled.div`
 
 const Welcome = styled.div`
   display: flex;
+  flex: 1;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 0.75rem;
   width: 100%;
   max-width: 700px;
@@ -204,6 +206,13 @@ export default function Chatbox({
   const [showProviderPanel, setShowProviderPanel] = useState(false);
   const [userMcpServers, setUserMcpServers] = useState(() => getMcpServers());
   const engineMessagesRef = useRef([]);
+  // Plan 002 R2 — dedup the "tools off" session notice across turns within
+  // the same browser session. Keyed by `<provider>|<model>|<source>` so a
+  // mid-session reclassification (e.g., auto-learn promotion to
+  // "auto-learned" source) fires a fresh notice. Resets on full page
+  // reload (acceptable; notice fatigue mitigated by Set + ref persistence
+  // across React 18 strict-mode double-renders and Chatbox unmount).
+  const sessionNoticeSeenRef = useRef(new Set());
   const [contextUsage, setContextUsage] = useState({ used: 0, total: 0 });
 
   // MCP health-probe state (Unit 4). The Map is the single source of truth
@@ -457,9 +466,52 @@ export default function Chatbox({
         providerConfig,
         ...(csrfToken ? { csrfToken } : {}),
         mcpServers: allMcpServers,
+        // Plan 002 — capability resolution input. The engine reads each
+        // model's `capabilities` array (populated by listModels per
+        // provider) to decide whether to pass tools and which system
+        // prompt variant to use.
+        modelList: discoveredModels,
+        // Plan 002 R2/R7 — engine fires per turn when tools are gated.
+        // Consumer dedups across turns via the seen-Set ref below and
+        // appends a UI-only system message to the visible chat (R2).
+        onSessionNotice: (event) => {
+          if (!event || event.type !== "tools_disabled") return;
+          const dedupKey = `${event.provider || "?"}|${event.model}|${event.source || "?"}`;
+          if (sessionNoticeSeenRef.current.has(dedupKey)) return;
+          sessionNoticeSeenRef.current.add(dedupKey);
+          const displayName = event.displayName || event.model;
+          const content = event.source === "auto-learned"
+            ? `Tools off — ${displayName} answers from training data only. (Learned from earlier responses; clears in 30 days.)`
+            : `Tools off — ${displayName} answers from training data only.`;
+          setMessages((prev) => [...prev, { role: "system", content }]);
+        },
         // Inject domain-specific extensions (empty for generic sidebar)
         ...engineExtensions,
-        onToolStatus: setToolStatus,
+        onToolStatus: (status) => {
+          setToolStatus(status);
+          // Round-boundary buffer reset: when tools finish and the engine
+          // is about to stream the next assistant round, clear the
+          // accumulators so LiveActivity / LivePreview reflect only the
+          // current round's thinking and content, not stale text from
+          // the previous round.
+          if (status === null) {
+            accumulatedThinking = "";
+            accumulatedContent = "";
+            setThinkingBuffer("");
+            setContentBuffer("");
+          }
+        },
+        // Engine fires this before retrying without tools when a
+        // tool-incapable model refused or emitted unparseable tool JSON.
+        // Wipe streaming buffers so the misleading first-attempt text
+        // doesn't flash in the loading bubble before the retry stream
+        // replaces it.
+        onContentReset: () => {
+          accumulatedThinking = "";
+          accumulatedContent = "";
+          setThinkingBuffer("");
+          setContentBuffer("");
+        },
         onThinkingChunk: (chunk) => {
           if (!isThinkingEnabled || !chunk) return;
           accumulatedThinking += chunk;
@@ -717,6 +769,13 @@ export default function Chatbox({
       abortRef.current = null;
       setToolStatus(null);
       setLoading(false);
+      // Clear streaming buffers regardless of how we got here. The success
+      // path also clears them, but on abort or thrown error the partial
+      // buffers would otherwise survive in state and flash on the next
+      // user prompt before its own setThinkingBuffer("")/setContentBuffer("")
+      // reset runs.
+      setThinkingBuffer("");
+      setContentBuffer("");
     }
   }, [input, loading, selectedModel, isThinkingEnabled, contextUsage.total, providerConfig, csrfToken, allMcpServers, isEmbedded, updateVariableInputValues, engineExtensions, onResult, resolveVisualizationUrl]);
 
@@ -748,7 +807,10 @@ export default function Chatbox({
     return (
       <ThemeProvider theme={chatTheme}>
         <Shell $hasMessages>
-          <LLMProviderPanel onSave={handleProviderSave} />
+          <LLMProviderPanel
+            onSave={handleProviderSave}
+            onClose={() => setShowProviderPanel(false)}
+          />
         </Shell>
       </ThemeProvider>
     );

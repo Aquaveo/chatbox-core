@@ -47,8 +47,9 @@ const SaveButton = styled.button`
 
 const Header = styled.div`
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-start;
   align-items: center;
+  gap: 6px;
   margin-bottom: 8px;
 `;
 
@@ -57,7 +58,29 @@ const Title = styled.span`
   font-size: 0.9rem;
 `;
 
-export default function LLMProviderPanel({ onSave }) {
+const BackButton = styled.button`
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: ${({ theme }) => theme.colors?.textMuted || "#666"};
+  cursor: pointer;
+  border-radius: 4px;
+  &:hover { background: ${({ theme }) => theme.colors?.borderHover || "#f0f0f0"}; color: ${({ theme }) => theme.colors?.text || "#222"}; }
+`;
+
+const BackIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <line x1="19" y1="12" x2="5" y2="12" />
+    <polyline points="12 19 5 12 12 5" />
+  </svg>
+);
+
+export default function LLMProviderPanel({ onSave, onClose }) {
   const [config, setConfig] = useState(() => getProviderConfig());
 
   const handleProviderChange = (e) => {
@@ -83,6 +106,16 @@ export default function LLMProviderPanel({ onSave }) {
   return (
     <Panel>
       <Header>
+        {onClose && (
+          <BackButton
+            type="button"
+            onClick={onClose}
+            aria-label="Back to chat"
+            title="Back to chat"
+          >
+            <BackIcon />
+          </BackButton>
+        )}
         <Title>LLM Provider</Title>
       </Header>
 
