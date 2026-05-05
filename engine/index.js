@@ -472,6 +472,15 @@ export async function processToolCalls(
       }
     }
 
+    // Unit A2 / K2 — capture per-call envelope counts BEFORE the
+    // recognition block so the slice afterward yields exactly the UUIDs
+    // dispatched by THIS tool call (not cumulative across the turn).
+    // If the recognition block is reordered or split, this delta breaks
+    // silently — keep these reads adjacent to the pushes below.
+    const visBefore = state.pendingVisualizations.length;
+    const layerBefore = state.pendingLayerUpdates.length;
+    const patchBefore = state.pendingPatches.length;
+
     // Collect visualization specs from the ORIGINAL result (before truncation)
     if (toolResult && typeof toolResult === "object" && toolResult.visualization) {
       state.pendingVisualizations.push(toolResult.visualization);
@@ -503,23 +512,103 @@ export async function processToolCalls(
       });
     }
 
-    // Truncate large results before storing in conversation history
-    let resultContent = toolResult && typeof toolResult === "object"
-      ? JSON.stringify(toolResult)
+    // Unit A2 / K2 — compute the per-call delta. Each envelope kind
+    // contributes the UUIDs of envelopes added between visBefore↔now.
+    const dispatchedUuids = [
+      ...state.pendingVisualizations
+        .slice(visBefore)
+        .map((v) => v?.uuid)
+        .filter((u) => typeof u === "string"),
+      ...state.pendingLayerUpdates
+        .slice(layerBefore)
+        .map((l) => l?.uuid)
+        .filter((u) => typeof u === "string"),
+      ...state.pendingPatches
+        .slice(patchBefore)
+        .map((p) => p?.uuid)
+        .filter((u) => typeof u === "string"),
+    ];
+
+    // Unit A2 / K1 + K5 + K15 — inject `_engine_dispatched` only on
+    // object-shaped results; skip silently for null/scalar. K5: if the
+    // tool result already carries the reserved key, log a warning and
+    // overwrite with the engine's authoritative value (collision check
+    // fires before the truncation pass).
+    //
+    // Build a forwarded wrapper rather than mutating `toolResult` so
+    // downstream consumers that observe the original shape — notably
+    // `afterToolExecution` hooks and any extension that reads the
+    // tool result post-execution — see the unmodified server response.
+    const isObjResult = toolResult !== null && typeof toolResult === "object";
+    let resultForLlm = toolResult;
+    if (isObjResult) {
+      if (Object.prototype.hasOwnProperty.call(toolResult, "_engine_dispatched")) {
+        console.warn(
+          `[chatbox-core] Tool ${toolName} returned a reserved key ` +
+            `'_engine_dispatched' in its result. Overwriting with engine value.`,
+        );
+      }
+      // Spread + reassign drops the adversarial value if any, then sets
+      // the engine's authoritative value last (object-key insertion order
+      // makes the engine's value win even on engines that surface dupes).
+      resultForLlm = { ...toolResult, _engine_dispatched: dispatchedUuids };
+    }
+
+    // Truncate large results before storing in conversation history.
+    // Unit A2 / K3 — when the result exceeds MAX_TOOL_RESULT_CHARS,
+    // produce a structured compact summary that preserves
+    // `_engine_dispatched` regardless of envelope kind. This also fixes
+    // a pre-existing latent bug where `layer_update` and `patch_update`
+    // truncation fell through to a naive string-slice that destroyed
+    // their structure in the LLM-visible message.
+    let resultContent = isObjResult
+      ? JSON.stringify(resultForLlm)
       : String(toolResult ?? "");
 
     if (resultContent.length > MAX_TOOL_RESULT_CHARS) {
-      if (toolResult?.visualization) {
-        // Preserve visualization reference in a compact summary
-        resultContent = JSON.stringify({
-          visualization: { source: toolResult.visualization.source, vizType: toolResult.visualization.vizType },
-          _truncated: true,
-          _originalChars: resultContent.length,
-        });
+      const originalLen = resultContent.length;
+      if (isObjResult) {
+        // Build summary from the original toolResult so we can read
+        // envelope shapes; `_engine_dispatched` carries the engine's
+        // authoritative dispatchedUuids regardless of any adversarial
+        // value the source might have included.
+        let summary;
+        if (toolResult.visualization) {
+          summary = {
+            visualization: {
+              source: toolResult.visualization.source,
+              vizType: toolResult.visualization.vizType,
+              uuid: toolResult.visualization.uuid,
+            },
+          };
+        } else if (toolResult.layer_update) {
+          summary = {
+            layer_update: {
+              uuid: toolResult.layer_update.uuid,
+              action: toolResult.layer_update.action,
+            },
+          };
+        } else if (toolResult.patch_update) {
+          summary = {
+            patch_update: { uuid: toolResult.patch_update.uuid },
+          };
+        } else {
+          // Data-only oversized — preserve key shape, drop value bodies.
+          summary = {};
+          if (typeof toolResult.error === "string") {
+            summary.error = toolResult.error;
+          }
+        }
+        summary._engine_dispatched = dispatchedUuids;
+        summary._truncated = true;
+        summary._originalChars = originalLen;
+        resultContent = JSON.stringify(summary);
       } else {
-        const originalLen = resultContent.length;
-        resultContent = resultContent.slice(0, MAX_TOOL_RESULT_CHARS)
-          + `\n...[truncated, full result was ${originalLen} chars]`;
+        // K1 — non-object results never gain `_engine_dispatched`; keep
+        // the legacy string-slice fallback for scalar/null oversized.
+        resultContent =
+          resultContent.slice(0, MAX_TOOL_RESULT_CHARS) +
+          `\n...[truncated, full result was ${originalLen} chars]`;
       }
     }
 
