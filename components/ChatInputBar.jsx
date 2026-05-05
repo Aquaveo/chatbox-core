@@ -1,4 +1,4 @@
-import { useRef, useCallback } from "react";
+import { useRef, useCallback, useEffect } from "react";
 import styled from "styled-components";
 import ContextUsageIndicator from "./ContextUsageIndicator";
 
@@ -297,12 +297,16 @@ export default function ChatInputBar({
   const handleInput = useCallback(
     (e) => {
       setInput(e.target.value);
-      const el = e.target;
-      el.style.height = "auto";
-      el.style.height = `${el.scrollHeight}px`;
     },
     [setInput],
   );
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [input]);
 
   return (
     <InputSection>
