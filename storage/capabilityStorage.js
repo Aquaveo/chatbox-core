@@ -51,11 +51,17 @@ function readAll() {
   }
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return {};
+    if (!raw) {
+      // localStorage exists but has no entry. A previous write may have
+      // fallen back to memoryFallback (private mode / quota exceeded /
+      // setItem mocked-to-throw). Consult that before returning empty so
+      // the fail-open path is symmetric across read and write.
+      return Object.fromEntries(memoryFallback);
+    }
     const parsed = JSON.parse(raw);
     return parsed && typeof parsed === "object" ? parsed : {};
   } catch {
-    return {};
+    return Object.fromEntries(memoryFallback);
   }
 }
 

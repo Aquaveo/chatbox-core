@@ -32,6 +32,12 @@ export default defineConfig({
     include: ["**/*.test.{js,jsx}"],
     exclude: ["dist/**", "node_modules/**"],
 
+    // Setup hook — runs before each test file. Bridges Node 22+'s
+    // built-in `localStorage` (an empty `{}`) to jsdom's real Storage
+    // object so legacy bare-`localStorage` references work under
+    // `// @vitest-environment jsdom`. See test-setup.js for the why.
+    setupFiles: ["./test-setup.js"],
+
     // Per-test teardown — the load-bearing config that prevents stubs from
     // leaking across tests within the same worker. vitest defaults vary by
     // major; setting these explicitly makes the test contract auditable.
