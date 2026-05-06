@@ -16,7 +16,6 @@ import {
   detectAndStripToolShapedJson,
   extractInlineToolCallsWithResidual,
   getMessage,
-  looksLikeToolRefusal,
   maybeParseJson,
   omitEmptyArgs,
   mergeToolCalls,
@@ -24,7 +23,6 @@ import {
 } from "../helpers/index.js";
 import {
   getOverride as getCapabilityOverride,
-  recordFailure,
   resetFailureCounter,
 } from "../storage/capabilityStorage.js";
 import {
@@ -661,13 +659,7 @@ export async function runChatSession({
   thinkingEnabled,
   onThinkingChunk,
   onContentChunk,
-  onContentReset,
   onToolStatus,
-  // Plan 002: fired once per (session × model × source) when the engine
-  // gates tools off for the active model. The consumer renders a UI-only
-  // notice; the event content never enters `messages` (avoids self-
-  // reference pathology where small models fixate on their disabled state).
-  onSessionNotice,
   signal,
   providerConfig = { provider: "custom", baseUrl: "", apiKey: "" },
   csrfToken = "",
@@ -675,10 +667,6 @@ export async function runChatSession({
   mcpServers,
   history,
   maxContextTokens,
-  // Plan 002: populated model list from listModels() so the engine can
-  // resolve the active model's capability without re-fetching. The
-  // consumer (Chatbox.jsx) already maintains this list for the dropdown.
-  modelList = [],
 
   // Extension points (all optional — defaults produce a generic chatbox)
   systemPromptBuilder = buildGenericSystemMessage,
@@ -713,41 +701,10 @@ export async function runChatSession({
     toolCallsThisTurn: [],
   };
 
-  // Plan 002: resolve model tool-capability before building the system
-  // prompt. Determines whether to pass tools to the adapter, which system-
-  // prompt variant to use, and whether to fire a session notice.
-  const capability = resolveModelCapability(model, modelList, providerConfig?.provider);
-  // Engine treats tools as gated when the model is unsupported, OR when
-  // the model is unknown for ollama (signal-less but worth being safe).
-  // Custom-unknown stays tools-on per R5.
-  const toolsGated =
-    capability === "unsupported" ||
-    (capability === "unknown" && providerConfig?.provider === "ollama");
-
   let messages =
     Array.isArray(history) && history.length > 0
       ? [...history]
-      : [systemPromptBuilder({ toolsAvailable: !toolsGated })];
-
-  // Fire the session notice once per turn when gated. Consumer dedups
-  // across turns within the same browser session.
-  if (toolsGated && typeof onSessionNotice === "function") {
-    // Look up the display name from the model list when available.
-    const modelEntry = Array.isArray(modelList)
-      ? modelList.find((m) => m?.name === model)
-      : null;
-    const displayName = modelEntry?.displayName || model;
-    onSessionNotice({
-      type: "tools_disabled",
-      model,
-      displayName,
-      provider: providerConfig?.provider,
-      // `source` distinguishes registry-based gating from auto-learned
-      // overrides. For now (Unit 2 scope), the source is always the
-      // provider signal; Unit 3 will introduce the "auto-learned" source.
-      source: "provider-signal",
-    });
-  }
+      : [systemPromptBuilder({ toolsAvailable: true })];
 
   const text = typeof prompt === "string" ? prompt : "";
 
@@ -776,17 +733,15 @@ export async function runChatSession({
   }
 
   // Select tools once per user message — stable across the entire chat loop.
-  // When tools are gated off (Plan 002), pass an empty array to the adapter
-  // regardless of MCP discovery. Discovery still runs so MCP-related UI
-  // surfaces (server status, tool counts) stay accurate.
-  const selectedTools = toolsGated
-    ? []
-    : await selectToolsForPrompt(
-        typeof prompt === "string" ? prompt : "",
-        toolsByServer,
-        classificationByServer,
-        embeddingsByServer,
-      );
+  // Always offer MCP tools when servers expose them. Tool-capability metadata
+  // is advisory only; do not suppress tools based on model registry signals or
+  // previously auto-learned localStorage classifications.
+  const selectedTools = await selectToolsForPrompt(
+    typeof prompt === "string" ? prompt : "",
+    toolsByServer,
+    classificationByServer,
+    embeddingsByServer,
+  );
 
   try {
     messages.push({ role: "user", content: text });
@@ -854,116 +809,16 @@ export async function runChatSession({
         // tool-call-shaped JSON (e.g., {"tool": "x", "action": "y"}) with
         // a key combination that didn't structurally match a real tool call.
         const toolShape = detectAndStripToolShapedJson(assistantText);
-        const isRefusal = looksLikeToolRefusal(assistantText);
-
-        // Tool-incapable model recovery path: when a model can't reliably
-        // use the tools we offered (it either emits raw tool-call-shaped
-        // JSON OR refuses with "I am a tool-using AI assistant..."), retry
-        // the same request without the tools list so it answers from its
-        // own knowledge. Surface a non-blocking UI notice so the user knows
-        // the model couldn't use tools.
-        const offeredTools = Array.isArray(selectedTools) && selectedTools.length > 0;
-        if (offeredTools && (toolShape.hadToolShapedJson || isRefusal)) {
-          // Clear streaming buffers so the misleading first-attempt text
-          // doesn't flash before the retry's stream replaces it.
-          onContentReset?.();
-
-          // Plan 002: record a failure observation. After N=2 consecutive
-          // observations for this (provider, model), the override is
-          // persisted and future calls skip the wasted refusal turn.
-          recordFailure(providerConfig?.provider, model);
-
-          // Plan 002: surface the notice via onSessionNotice (UI-only) —
-          // do NOT push a system message into `messages`. Pushing it
-          // would (a) violate strict-alternation on Ollama Cloud and
-          // (b) cause smaller models to fixate on their own disabled
-          // state in subsequent turns. Plan 001's earlier draft pushed
-          // the notice into messages; Plan 002 supersedes that.
-          if (typeof onSessionNotice === "function") {
-            const modelEntry = Array.isArray(modelList)
-              ? modelList.find((m) => m?.name === model)
-              : null;
-            const displayName = modelEntry?.displayName || model;
-            onSessionNotice({
-              type: "tools_disabled",
-              model,
-              displayName,
-              provider: providerConfig?.provider,
-              source: "auto-learned",
-            });
-          }
-
-          let retryResponse;
-          try {
-            retryResponse = await streamWithAdapter({
-              messages,
-              tools: [], // retry without tools
-              model,
-              thinkingEnabled,
-              onThinkingChunk,
-              onContentChunk,
-              providerConfig,
-              csrfToken,
-              signal,
-            });
-          } catch (retryErr) {
-            // If the retry itself fails, fall through to surfacing the
-            // sanitized first attempt with a fallback message rather than
-            // crashing the turn.
-            retryResponse = null;
-          }
-
-          if (retryResponse) {
-            const retryMessage = getMessage(retryResponse);
-            assistantText = stripThinkTags(
-              typeof retryMessage.content === "string" ? retryMessage.content : "",
-            );
-            // Belt-and-suspenders: if the retry ALSO emits tool-shaped
-            // JSON (model is fundamentally confused), strip and fall back.
-            const retryShape = detectAndStripToolShapedJson(assistantText);
-            if (retryShape.hadToolShapedJson) {
-              assistantText = retryShape.stripped.trim()
-                || "I couldn't produce a useful answer for this request. Could you rephrase?";
-            }
-          } else {
-            assistantText = "I couldn't reach the model to answer without tools. Try again, or switch to a tool-capable model.";
-          }
-
-          messages.push({ role: "assistant", content: assistantText, ...(toolsGated ? { _toolsGated: true } : {}) });
-          return {
-            assistantText,
-            queryResult: state.lastQueryResult
-              ? { data: state.lastQueryResult, sql: state.lastQuerySQL }
-              : undefined,
-            visualizations: state.pendingVisualizations.length > 0
-              ? state.pendingVisualizations
-              : undefined,
-            layerUpdates: state.pendingLayerUpdates.length > 0
-              ? state.pendingLayerUpdates
-              : undefined,
-            patches: state.pendingPatches.length > 0
-              ? state.pendingPatches
-              : undefined,
-            rejectedPatches: state.rejectedPatches.length > 0
-              ? state.rejectedPatches
-              : undefined,
-            // Plan 003 / Unit A1 — host-UI banner inputs. Always returned
-            // (even empty) so consumers can rely on shape stability.
-            toolTagsByName,
-            toolCallsThisTurn: state.toolCallsThisTurn,
-            messages,
-            perServer,
-          };
-        }
-
-        // No retry needed (no tools were offered, OR the model gave a
-        // legitimate non-tool answer). If tool-shaped JSON snuck through,
-        // strip it and use the residual / fallback.
+        // If a model produces malformed tool-shaped JSON that the inline
+        // extractor could not convert into a real tool call, strip it from
+        // the user-visible answer. Do not retry without tools or persist a
+        // local "unsupported" classification; TethysDash workflows are
+        // tool-driven and should keep tools available on the next turn.
         if (toolShape.hadToolShapedJson) {
           assistantText = toolShape.stripped.trim()
             || "I tried to use a tool but couldn't complete the request. Could you rephrase?";
         }
-        messages.push({ role: "assistant", content: assistantText, ...(toolsGated ? { _toolsGated: true } : {}) });
+        messages.push({ role: "assistant", content: assistantText });
         return {
           assistantText,
           queryResult: state.lastQueryResult

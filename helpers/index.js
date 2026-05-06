@@ -257,12 +257,12 @@ function stripMatchedSpans(text, matches) {
 // directions." instead of answering from its own knowledge — even when the
 // question doesn't actually need tools.
 //
-// The engine uses this to detect those cases and retry without tools, so
-// the user gets a normal answer plus a notice that the model couldn't use
-// tools. False positives are minimized by requiring BOTH a tool-framing
-// phrase AND a refusal phrase, and by capping the matching window so a
-// long legitimate answer that mentions tool-using AI in passing doesn't
-// match.
+// Legacy detector retained for downstream callers and tests. The engine no
+// longer uses this to retry without tools or disable tools; TethysDash
+// workflows keep MCP tools available. False positives are minimized by
+// requiring BOTH a tool-framing phrase AND a refusal phrase, and by capping
+// the matching window so a long legitimate answer that mentions tool-using AI
+// in passing doesn't match.
 export function looksLikeToolRefusal(text) {
   if (typeof text !== "string" || !text.trim()) return false;
   if (text.length > 400) return false;

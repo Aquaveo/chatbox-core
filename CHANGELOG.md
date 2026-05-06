@@ -10,18 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.0] — 2026-05-06
 
-Drops the literal-IP / loopback rejection from `validateServerUrl()`.
-The gate was a partial defense for a threat (DNS rebinding) it could
-not actually prevent — its own docstring conceded as much — and it
-blocked the legitimate Aquaveo deployment pattern of co-locating an
-MCP server with the host application on the same machine. Removal
-trades a defense-in-depth layer for the deployment-pattern fit; CORS
-on the MCP server is now the load-bearing browser-side defense for
-cross-origin abuse of localhost MCP servers.
+Two reversals of recently-shipped gates that turned out to block
+legitimate use more than they prevented the threats they targeted:
 
-`PRIVATE_HOST_PATTERNS` and `isLocalHost` remain exported so consumers
-that have an authoritative reason to gate (e.g. multi-tenant relays,
-browser extensions) can apply the check at their own layer.
+1. The literal-IP / loopback rejection in `validateServerUrl()`
+   (originally landed alongside the April 26 probe-scheduler hardening).
+2. The capability-based tool gating from Plan 002 (shipped one day
+   ago in 0.3.0 / PR #5).
+
+Both followed the same pattern: a defense-in-depth check applied
+inside the chatbox-core library that didn't have access to enough
+deployment context to distinguish "real attacker" from "the
+documented Aquaveo flow." Removed; the deployment is responsible for
+its own auth / CORS / model selection, and chatbox-core trusts what
+its host tells it.
 
 ### Breaking changes
 
@@ -33,29 +35,77 @@ browser extensions) can apply the check at their own layer.
   All `http(s)://` URLs that pass scheme sanitization +
   credential-stripping + mixed-content checks are accepted,
   regardless of host.
+- **`runChatSession` parameters removed**: `onSessionNotice`,
+  `onContentReset`, `modelList`. Hosts that wired these up should
+  delete the wiring; tools are now always offered when MCP servers
+  expose them, so the "tools-disabled" UI surface they powered is
+  obsolete.
 
-### Features
+### Loopback / private-IP rejection — removed
 
-- Loopback / private / link-local hostnames are accepted by default,
-  including `localhost`, `127.0.0.1`, `[::1]`, RFC1918 ranges,
-  `169.254.0.0/16`, and `fe80::/10`. Matches the original brainstorm
-  decision (D2 of the April 22 MCP server health-probe requirements)
-  before the April 26 hardening plan partially reversed it.
+The `validateServerUrl()` literal-IP guard was a partial defense for
+a threat (DNS rebinding) it could not actually prevent — its own
+docstring conceded as much — and it blocked the legitimate Aquaveo
+deployment pattern of co-locating an MCP server with the host
+application on the same machine. CORS on the MCP server is now the
+load-bearing browser-side defense for cross-origin abuse of localhost
+MCP servers.
+
+`PRIVATE_HOST_PATTERNS` and `isLocalHost` remain exported so consumers
+that have an authoritative reason to gate (e.g. multi-tenant relays,
+browser extensions) can apply the check at their own layer.
+
+Loopback / private / link-local hostnames are now accepted by default,
+including `localhost`, `127.0.0.1`, `[::1]`, RFC1918 ranges,
+`169.254.0.0/16`, and `fe80::/10`. Matches the original brainstorm
+decision (D2 of the April 22 MCP server health-probe requirements)
+before the April 26 hardening plan partially reversed it.
+
+### Capability-based tool gating — removed
+
+Plan 002 (shipped in 0.3.0) gated MCP tools off when the active
+model's capability resolved to `unsupported`, or to `unknown` for the
+ollama provider. The intent was to spare small/incompatible models
+from refusal classes ("I don't have access to tools"). In practice,
+TethysDash workflows are tool-driven on every meaningful turn — the
+gate withheld the tools the user actually wanted — and the
+auto-learn fallback that was supposed to soften the failure mode
+introduced its own surprise (silent locking based on per-browser
+localStorage classifications that the user couldn't see).
+
+`runChatSession` no longer derives `toolsGated` from capability +
+provider. Tools are always selected from the live tool list when MCP
+servers expose them. Capability metadata is still resolved (via
+`resolveModelCapability`) so hosts can render display / diagnostic
+hints, but the engine no longer acts on it.
+
+UI surface removed: `ChatMessage.jsx`'s `$toolsGated` styled-component
+prop and the faint left-border marker on assistant turns produced
+under tool-gating. The `_toolsGated` message field is no longer set
+or read.
+
+`looksLikeToolRefusal()` in `helpers/index.js` is retained for
+downstream callers and tests but is no longer used by the engine
+loop. Its docstring now reflects the legacy status.
 
 ### Internal
 
-- Test suite reshaped: `engine/transports.test.js`'s "literal-IP
-  rejection" and "allowLocal toggle" describe blocks replaced by a
-  single "loopback / private IPs are accepted" suite (12 host shapes
-  + an explicit `NODE_ENV=production` acceptance check).
-- 286/286 chatbox-core tests pass.
+- `engine/transports.test.js`: "literal-IP rejection" and
+  "allowLocal toggle" describe blocks replaced by a single
+  "loopback / private IPs are accepted" suite (12 host shapes +
+  an explicit `NODE_ENV=production` acceptance check).
+- `engine/capabilityGating.test.js`: gating decision table reversed
+  — `isGated()` now returns `false` for every input. The
+  `resolveModelCapability` resolution table is kept (still used for
+  diagnostics).
 
 ### Solution doc
 
 `docs/solutions/best-practices/chatbox-core-loopback-validation-removed-2026-05-06.md`
-in the firoh workspace captures the threat-model framing,
-decision-boundary table, and the post-removal CORS-as-load-bearing-defense
-expectation for downstream consumers.
+in the firoh workspace captures the threat-model framing for the
+loopback-gate removal, including the decision-boundary table and the
+post-removal CORS-as-load-bearing-defense expectation for downstream
+consumers.
 
 ## [0.3.0] — 2026-05-04
 

@@ -1,12 +1,9 @@
 /**
  * engine/capabilityGating.test.js — coverage for resolveModelCapability
- * (the pure helper) plus wiring tests for the gating flow that the engine
- * derives from it.
+ * (the pure helper) plus the current no-gating policy.
  *
- * Plan 002 Unit 2: the engine reads the active model's capability from
- * the populated model list (Unit 1's listModels output) and gates tools
- * accordingly. This test file pins the resolution table directly, which
- * is the contract the engine relies on.
+ * Capability resolution is retained for display/diagnostics compatibility,
+ * but it must not cause the engine to withhold MCP tools.
  */
 
 import { describe, expect, it } from "vitest";
@@ -76,33 +73,28 @@ describe("resolveModelCapability", () => {
   });
 });
 
-describe("gating decision derived from capability + provider", () => {
-  // The engine derives `toolsGated` from capability + provider:
-  //   unsupported (any provider) → gated
-  //   unknown + ollama → gated
-  //   unknown + custom → NOT gated (per R5 — custom defaults tools-on)
-  //   supported (any) → NOT gated
-  // This test pins the decision table that runChatSession depends on.
+describe("tool gating policy", () => {
+  // TethysDash workflows are tool-driven. Capability metadata can still be
+  // resolved for display/diagnostics, but the engine no longer withholds MCP
+  // tools based on provider signals, unknown Ollama models, or auto-learned
+  // localStorage classifications.
 
-  function isGated(capability, provider) {
-    return (
-      capability === "unsupported" ||
-      (capability === "unknown" && provider === "ollama")
-    );
+  function isGated() {
+    return false;
   }
 
-  it("gates when capability is unsupported regardless of provider", () => {
-    expect(isGated("unsupported", "anthropic")).toBe(true);
-    expect(isGated("unsupported", "openai")).toBe(true);
-    expect(isGated("unsupported", "ollama")).toBe(true);
-    expect(isGated("unsupported", "custom")).toBe(true);
+  it("does NOT gate when capability is unsupported", () => {
+    expect(isGated("unsupported", "anthropic")).toBe(false);
+    expect(isGated("unsupported", "openai")).toBe(false);
+    expect(isGated("unsupported", "ollama")).toBe(false);
+    expect(isGated("unsupported", "custom")).toBe(false);
   });
 
-  it("gates when capability is unknown for ollama", () => {
-    expect(isGated("unknown", "ollama")).toBe(true);
+  it("does NOT gate when capability is unknown for ollama", () => {
+    expect(isGated("unknown", "ollama")).toBe(false);
   });
 
-  it("does NOT gate when capability is unknown for custom (R5)", () => {
+  it("does NOT gate when capability is unknown for custom", () => {
     expect(isGated("unknown", "custom")).toBe(false);
   });
 

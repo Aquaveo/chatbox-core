@@ -46,17 +46,6 @@ const Bubble = styled.article`
   max-width: ${(props) => (props.$isUser ? "90%" : "100%")};
   flex: ${(props) => (props.$isUser ? "unset" : "1")};
 
-  /* Plan 002 R7 — assistant turns produced under tool-gating get a faint
-     left-border marker so users scrolling back through chat history can
-     identify which responses happened with tools disabled. Subtle by
-     design — same muted register as ToolStatusText, no new color. */
-  ${(props) =>
-    props.$toolsGated &&
-    `
-    border-left: 3px solid ${props.theme.colors.borderLight || "#c8d8e2"};
-    padding-left: calc(0.9rem - 3px);
-  `}
-
   /* Wrap long unbreakable strings in code without forcing prose breaks. */
   pre, code {
     white-space: pre-wrap;
@@ -116,7 +105,7 @@ export default function ChatMessage({ message, isEmbedded, MessageRenderer }) {
       <Avatar $isUser={isUser}>
         {isUser ? <UserIcon /> : <BotIcon />}
       </Avatar>
-      <Bubble $isUser={isUser} $toolsGated={Boolean(message._toolsGated)} title={message._toolsGated ? "Generated with tools disabled" : undefined}>
+      <Bubble $isUser={isUser}>
         {!isUser && message.thinking && (
           <ThinkingDropdown>
             <summary>Thinking</summary>
