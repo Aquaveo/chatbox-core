@@ -8,6 +8,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-05-06
+
+Drops the literal-IP / loopback rejection from `validateServerUrl()`.
+The gate was a partial defense for a threat (DNS rebinding) it could
+not actually prevent — its own docstring conceded as much — and it
+blocked the legitimate Aquaveo deployment pattern of co-locating an
+MCP server with the host application on the same machine. Removal
+trades a defense-in-depth layer for the deployment-pattern fit; CORS
+on the MCP server is now the load-bearing browser-side defense for
+cross-origin abuse of localhost MCP servers.
+
+`PRIVATE_HOST_PATTERNS` and `isLocalHost` remain exported so consumers
+that have an authoritative reason to gate (e.g. multi-tenant relays,
+browser extensions) can apply the check at their own layer.
+
+### Breaking changes
+
+- **`ERROR_KEYS.privateIp` removed.** Downstream code branching on
+  this key must delete the branch on upgrade. The matching
+  `ERROR_COPY` entry ("Private or loopback addresses are not
+  allowed in production") is gone too.
+- **`validateServerUrl` no longer accepts an `allowLocal` option.**
+  All `http(s)://` URLs that pass scheme sanitization +
+  credential-stripping + mixed-content checks are accepted,
+  regardless of host.
+
+### Features
+
+- Loopback / private / link-local hostnames are accepted by default,
+  including `localhost`, `127.0.0.1`, `[::1]`, RFC1918 ranges,
+  `169.254.0.0/16`, and `fe80::/10`. Matches the original brainstorm
+  decision (D2 of the April 22 MCP server health-probe requirements)
+  before the April 26 hardening plan partially reversed it.
+
+### Internal
+
+- Test suite reshaped: `engine/transports.test.js`'s "literal-IP
+  rejection" and "allowLocal toggle" describe blocks replaced by a
+  single "loopback / private IPs are accepted" suite (12 host shapes
+  + an explicit `NODE_ENV=production` acceptance check).
+- 286/286 chatbox-core tests pass.
+
+### Solution doc
+
+`docs/solutions/best-practices/chatbox-core-loopback-validation-removed-2026-05-06.md`
+in the firoh workspace captures the threat-model framing,
+decision-boundary table, and the post-removal CORS-as-load-bearing-defense
+expectation for downstream consumers.
+
 ## [0.3.0] — 2026-05-04
 
 Adds the dispatch-feedback contract: hosts get authoritative ground
