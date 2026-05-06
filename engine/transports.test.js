@@ -167,87 +167,32 @@ describe("validateServerUrl", () => {
     });
   });
 
-  describe("literal-IP rejection (production builds)", () => {
-    // NODE_ENV is stubbed to "production" by the outer beforeEach;
-    // allowLocal default → false; private/loopback IPs rejected.
+  describe("loopback / private IPs are accepted (gate removed 2026-05-06)", () => {
+    // The literal-IP rejection was removed because it blocked the
+    // legitimate Aquaveo deployment pattern of running an MCP server
+    // alongside a Tethys app on the same host. validateServerUrl now
+    // accepts these regardless of NODE_ENV.
 
     it.each([
       ["http://localhost/mcp", "localhost"],
       ["http://LOCALHOST/mcp", "uppercase localhost"],
       ["http://127.0.0.1/mcp", "IPv4 loopback"],
-      ["http://127.255.255.254/mcp", "IPv4 loopback range edge"],
       ["http://10.0.0.1/mcp", "RFC1918 10.x"],
       ["http://172.16.0.1/mcp", "RFC1918 172.16.x"],
-      ["http://172.31.255.254/mcp", "RFC1918 172.31.x edge"],
       ["http://192.168.1.1/mcp", "RFC1918 192.168.x"],
-      ["http://169.254.169.254/mcp", "AWS IMDS link-local"],
+      ["http://169.254.169.254/mcp", "link-local"],
       ["http://0.0.0.0/mcp", "wildcard"],
       ["http://[::1]/mcp", "IPv6 loopback"],
       ["http://[fe80::1]/mcp", "IPv6 link-local"],
-    ])("rejects %s (%s)", (input) => {
+      ["http://8.8.8.8/mcp", "public IPv4"],
+      ["http://[2001:4860:4860::8888]/mcp", "public IPv6"],
+    ])("accepts %s (%s)", (input) => {
       const result = validateServerUrl(input);
-      expect(result.ok).toBe(false);
-      expect(result.errorKey).toBe(ERROR_KEYS.privateIp);
-    });
-
-    it("172.15.x is NOT rejected (just outside RFC1918 range)", () => {
-      const result = validateServerUrl("http://172.15.0.1/mcp");
       expect(result.ok).toBe(true);
     });
 
-    it("172.32.x is NOT rejected (just outside RFC1918 range)", () => {
-      const result = validateServerUrl("http://172.32.0.1/mcp");
-      expect(result.ok).toBe(true);
-    });
-
-    it("public IPv4 (8.8.8.8) is NOT rejected", () => {
-      const result = validateServerUrl("http://8.8.8.8/mcp");
-      expect(result.ok).toBe(true);
-    });
-
-    it("public IPv6 is NOT rejected", () => {
-      const result = validateServerUrl("http://[2001:4860:4860::8888]/mcp");
-      expect(result.ok).toBe(true);
-    });
-  });
-
-  describe("allowLocal toggle", () => {
-    it("explicit allowLocal:true accepts localhost regardless of NODE_ENV", () => {
+    it("accepts localhost regardless of NODE_ENV=production", () => {
       vi.stubEnv("NODE_ENV", "production");
-      const result = validateServerUrl("http://localhost/mcp", { allowLocal: true });
-      expect(result.ok).toBe(true);
-    });
-
-    it("explicit allowLocal:false rejects localhost regardless of NODE_ENV", () => {
-      vi.stubEnv("NODE_ENV", "development");
-      const result = validateServerUrl("http://localhost/mcp", { allowLocal: false });
-      expect(result.ok).toBe(false);
-      expect(result.errorKey).toBe(ERROR_KEYS.privateIp);
-    });
-
-    it("allowLocal:undefined defaults to allow when NODE_ENV=development", () => {
-      vi.stubEnv("NODE_ENV", "development");
-      const result = validateServerUrl("http://localhost/mcp");
-      expect(result.ok).toBe(true);
-    });
-
-    it("allowLocal:undefined defaults to reject when NODE_ENV=production", () => {
-      vi.stubEnv("NODE_ENV", "production");
-      const result = validateServerUrl("http://localhost/mcp");
-      expect(result.ok).toBe(false);
-      expect(result.errorKey).toBe(ERROR_KEYS.privateIp);
-    });
-
-    it("allowLocal:undefined still rejects when NODE_ENV is empty", () => {
-      // Defensive against future refactors that flip the comparison
-      // from `!== "production"` to `=== "development"` — empty must
-      // still reject in the common case where it would previously have
-      // accepted (the check is "NOT production" not "IS development").
-      vi.stubEnv("NODE_ENV", "");
-      // With empty NODE_ENV, `!== "production"` is TRUE, so allowLocal
-      // defaults to true. This is the current behavior; the assertion
-      // documents it. If the comparison flips, the documented behavior
-      // changes and this test must be updated deliberately.
       const result = validateServerUrl("http://localhost/mcp");
       expect(result.ok).toBe(true);
     });

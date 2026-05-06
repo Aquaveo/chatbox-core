@@ -134,28 +134,27 @@ function isLocalHost(hostname) {
  * Pipeline:
  *   1. `sanitizeMcpUrl` — strip credentials, reject non-http(s) schemes.
  *   2. `preCheckUrl` — mixed-content guard for HTTPS-served pages.
- *   3. Literal-IP rejection — only in production builds (or when caller
- *      passes `allowLocal: false` explicitly). Dev builds default to allow
- *      so `http://localhost` works during development.
  *
- * Returns `{ ok, errorKey?, normalizedUrl?, sanitize? }`. Callers branch on
- * `ok`; on rejection, `errorKey` matches an `ERROR_KEYS` value so the same
- * copy table (`copyFor`) can be reused. `sanitize` is the original
+ * Loopback / private-IP rejection was removed (2026-05-06) because it
+ * blocked the legitimate Aquaveo deployment pattern of running an MCP
+ * server alongside a Tethys app on the same host. The literal-IP guard
+ * was a defense-in-depth layer against accidental misconfiguration; the
+ * primary defense (server-side relay against DNS rebinding) remains the
+ * deployment's responsibility. `PRIVATE_HOST_PATTERNS` and `isLocalHost`
+ * are still exported in case any caller wants to apply the gate
+ * themselves.
+ *
+ * Returns `{ ok, errorKey?, normalizedUrl?, sanitize? }`. Callers branch
+ * on `ok`; on rejection, `errorKey` matches an `ERROR_KEYS` value so the
+ * same copy table (`copyFor`) can be reused. `sanitize` is the original
  * `sanitizeMcpUrl` result so callers (like `addMcpServer`) can preserve
  * downstream UI signals such as the credential-stripped alert.
  *
  * @param {string} rawUrl
- * @param {{ allowLocal?: boolean }} [opts]
- *   `allowLocal` — when undefined, defaults to `process.env.NODE_ENV !==
- *   "production"`. Vite inlines `process.env.NODE_ENV` at build time, so dev
- *   bundles allow local IPs and production bundles reject them.
+ * @param {object} [opts] reserved for future options; currently unused.
  */
-export function validateServerUrl(rawUrl, { allowLocal } = {}) {
-  if (allowLocal === undefined) {
-    allowLocal =
-      typeof process !== "undefined" && process.env?.NODE_ENV !== "production";
-  }
-
+// eslint-disable-next-line no-unused-vars
+export function validateServerUrl(rawUrl, _opts = {}) {
   const sanitize = sanitizeMcpUrl(rawUrl);
   if (sanitize.invalidScheme || !sanitize.url) {
     return { ok: false, errorKey: ERROR_KEYS.invalidScheme, sanitize };
@@ -170,24 +169,6 @@ export function validateServerUrl(rawUrl, { allowLocal } = {}) {
       normalizedUrl: sanitize.url,
       sanitize,
     };
-  }
-
-  if (!allowLocal) {
-    let parsed;
-    try {
-      parsed = new URL(sanitize.url);
-    } catch {
-      // sanitizeMcpUrl already validated parseability; this branch is
-      // unreachable in practice but keeps the function total.
-    }
-    if (parsed && isLocalHost(parsed.hostname)) {
-      return {
-        ok: false,
-        errorKey: ERROR_KEYS.privateIp,
-        normalizedUrl: sanitize.url,
-        sanitize,
-      };
-    }
   }
 
   return { ok: true, normalizedUrl: sanitize.url, sanitize };

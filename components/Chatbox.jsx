@@ -207,13 +207,6 @@ export default function Chatbox({
   const [showProviderPanel, setShowProviderPanel] = useState(false);
   const [userMcpServers, setUserMcpServers] = useState(() => getMcpServers());
   const engineMessagesRef = useRef([]);
-  // Plan 002 R2 — dedup the "tools off" session notice across turns within
-  // the same browser session. Keyed by `<provider>|<model>|<source>` so a
-  // mid-session reclassification (e.g., auto-learn promotion to
-  // "auto-learned" source) fires a fresh notice. Resets on full page
-  // reload (acceptable; notice fatigue mitigated by Set + ref persistence
-  // across React 18 strict-mode double-renders and Chatbox unmount).
-  const sessionNoticeSeenRef = useRef(new Set());
   const [contextUsage, setContextUsage] = useState({ used: 0, total: 0 });
 
   // MCP health-probe state (Unit 4). The Map is the single source of truth
@@ -243,11 +236,11 @@ export default function Chatbox({
   // Merge prop-provided MCP servers with user-configured from localStorage.
   //
   // Prop-supplied servers are filtered through `validateServerUrl` so a
-  // malicious or misconfigured project default cannot inject `file://`,
-  // `http://internal-ip`, AWS-IMDS-style link-local addresses, etc. (review
-  // SSRF deferral). In production builds the literal-IP guard rejects
-  // private/loopback/link-local hosts; dev builds allow them so
-  // `http://localhost:9001` works during development.
+  // malicious or misconfigured project default cannot inject `file://`
+  // schemes or trigger mixed-content errors. The literal-IP rejection
+  // (loopback / private / link-local) was removed 2026-05-06 because it
+  // blocked the legitimate Aquaveo deployment pattern of an MCP server
+  // co-hosted with a Tethys app on the same machine.
   //
   // Rejected URLs are logged with credentials redacted via
   // `stripUrlCredentials` — a userinfo-bearing default like
@@ -467,25 +460,6 @@ export default function Chatbox({
         providerConfig,
         ...(csrfToken ? { csrfToken } : {}),
         mcpServers: allMcpServers,
-        // Plan 002 — capability resolution input. The engine reads each
-        // model's `capabilities` array (populated by listModels per
-        // provider) to decide whether to pass tools and which system
-        // prompt variant to use.
-        modelList: discoveredModels,
-        // Plan 002 R2/R7 — engine fires per turn when tools are gated.
-        // Consumer dedups across turns via the seen-Set ref below and
-        // appends a UI-only system message to the visible chat (R2).
-        onSessionNotice: (event) => {
-          if (!event || event.type !== "tools_disabled") return;
-          const dedupKey = `${event.provider || "?"}|${event.model}|${event.source || "?"}`;
-          if (sessionNoticeSeenRef.current.has(dedupKey)) return;
-          sessionNoticeSeenRef.current.add(dedupKey);
-          const displayName = event.displayName || event.model;
-          const content = event.source === "auto-learned"
-            ? `Tools off — ${displayName} answers from training data only. (Learned from earlier responses; clears in 30 days.)`
-            : `Tools off — ${displayName} answers from training data only.`;
-          setMessages((prev) => [...prev, { role: "system", content }]);
-        },
         // Inject domain-specific extensions (empty for generic sidebar)
         ...engineExtensions,
         onToolStatus: (status) => {
@@ -501,17 +475,6 @@ export default function Chatbox({
             setThinkingBuffer("");
             setContentBuffer("");
           }
-        },
-        // Engine fires this before retrying without tools when a
-        // tool-incapable model refused or emitted unparseable tool JSON.
-        // Wipe streaming buffers so the misleading first-attempt text
-        // doesn't flash in the loading bubble before the retry stream
-        // replaces it.
-        onContentReset: () => {
-          accumulatedThinking = "";
-          accumulatedContent = "";
-          setThinkingBuffer("");
-          setContentBuffer("");
         },
         onThinkingChunk: (chunk) => {
           if (!isThinkingEnabled || !chunk) return;

@@ -10,7 +10,6 @@
 export const ERROR_KEYS = Object.freeze({
   mixedContent: "mixed-content",
   invalidScheme: "invalid-scheme",
-  privateIp: "private-ip",
   connectionFailed: "connection-failed",
   notMcpServer: "not-mcp-server",
   timeout: "timeout",
@@ -26,8 +25,6 @@ export const ERROR_COPY = Object.freeze({
     "Insecure URL — https deployments cannot connect to http:// servers",
   [ERROR_KEYS.invalidScheme]:
     "Unsupported URL scheme — use http:// or https://",
-  [ERROR_KEYS.privateIp]:
-    "Private or loopback addresses are not allowed in production",
   [ERROR_KEYS.connectionFailed]: "Connection failed",
   [ERROR_KEYS.notMcpServer]: "Not an MCP server",
   [ERROR_KEYS.timeout]: "Connection timed out",
