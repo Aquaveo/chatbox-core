@@ -402,6 +402,87 @@ async function streamWithAdapter({
 }
 
 // ---------------------------------------------------------------------------
+// Plan 2026-05-07-002 Unit B: closed-vocabulary `{{last_<type>_uuid}}`
+// substitution.
+//
+// Some LLMs (observed: gemma4:31b) emit Mustache-style placeholders for
+// chained tool args, expecting the host framework to substitute the prior
+// tool's return value. MCP doesn't do this. This module-private helper
+// substitutes a small enumerated vocabulary against the engine's own
+// `state.lastReturnedUuids` map (populated when create_* tools return a
+// visualization with a recognized source). Anything outside the enumerated
+// vocabulary is left unchanged so the server-side `_validate_uuid_arg`
+// (Unit A) rejects it with a structured `invalid_uuid:` error envelope.
+//
+// Bright-line discipline:
+//   - Closed vocabulary only — 5 enumerated tokens. No regex-derived,
+//     no open-ended placeholder shapes.
+//   - Whole-string equality only — no partial substitution inside larger
+//     strings.
+//   - Authoritative source — the substituted value is a UUID the engine
+//     itself emitted on a prior tool result, never inferred from LLM intent.
+//   - No INFO logging — match the server-side `_coerce_known_values`
+//     silent-transformation precedent.
+// ---------------------------------------------------------------------------
+
+const _SOURCE_TO_TYPE_KEY = {
+  Map: "map",
+  "Inline Plotly": "plot",
+  "Inline Table": "table",
+  "Inline Card": "card",
+  "Variable Input": "variable_input",
+};
+
+const _PLACEHOLDER_TO_TYPE_KEY = {
+  "{{last_map_uuid}}": "map",
+  "{{last_plot_uuid}}": "plot",
+  "{{last_table_uuid}}": "table",
+  "{{last_card_uuid}}": "card",
+  "{{last_variable_input_uuid}}": "variable_input",
+};
+
+function _typeKeyFromSource(source) {
+  if (typeof source !== "string") return null;
+  return _SOURCE_TO_TYPE_KEY[source] ?? null;
+}
+
+/**
+ * Recursively walk `value`, replacing whole-string placeholder values with
+ * their tracked UUIDs from `lastReturnedUuids`. Mutates plain objects and
+ * arrays in place; leaves primitives, keys, and embedded substrings alone.
+ * Unknown placeholder forms pass through unchanged.
+ */
+function _substituteLastUuidPlaceholders(value, lastReturnedUuids) {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      const elem = value[i];
+      if (typeof elem === "string") {
+        const typeKey = _PLACEHOLDER_TO_TYPE_KEY[elem];
+        if (typeKey && lastReturnedUuids?.[typeKey]) {
+          value[i] = lastReturnedUuids[typeKey];
+        }
+      } else if (elem !== null && typeof elem === "object") {
+        _substituteLastUuidPlaceholders(elem, lastReturnedUuids);
+      }
+    }
+    return value;
+  }
+  for (const key of Object.keys(value)) {
+    const child = value[key];
+    if (typeof child === "string") {
+      const typeKey = _PLACEHOLDER_TO_TYPE_KEY[child];
+      if (typeKey && lastReturnedUuids?.[typeKey]) {
+        value[key] = lastReturnedUuids[typeKey];
+      }
+    } else if (child !== null && typeof child === "object") {
+      _substituteLastUuidPlaceholders(child, lastReturnedUuids);
+    }
+  }
+  return value;
+}
+
+// ---------------------------------------------------------------------------
 // Generic Tool Processing
 // ---------------------------------------------------------------------------
 
@@ -438,6 +519,14 @@ export async function processToolCalls(
       }
       if (preResult?.args) args = preResult.args;
       if (preResult?.toolName) toolName = preResult.toolName;
+    }
+
+    // Plan 2026-05-07-002 Unit B: substitute `{{last_<type>_uuid}}`
+    // placeholders against engine-tracked UUIDs *before* dispatching.
+    // Runs after `beforeToolExecution` so any domain-specific arg
+    // normalization the host injected has the canonical UUID to work with.
+    if (args && typeof args === "object" && state?.lastReturnedUuids) {
+      _substituteLastUuidPlaceholders(args, state.lastReturnedUuids);
     }
 
     const toolResult = await executeTool(toolName, args, connections, toolServerMap);
@@ -482,6 +571,15 @@ export async function processToolCalls(
     // Collect visualization specs from the ORIGINAL result (before truncation)
     if (toolResult && typeof toolResult === "object" && toolResult.visualization) {
       state.pendingVisualizations.push(toolResult.visualization);
+      // Plan 2026-05-07-002 Unit B: track the returned UUID by type so
+      // subsequent tool calls in this session can reference it via the
+      // `{{last_<type>_uuid}}` placeholder vocabulary.
+      const viz = toolResult.visualization;
+      const typeKey = _typeKeyFromSource(viz?.source);
+      if (typeKey && typeof viz?.uuid === "string" && viz.uuid) {
+        if (!state.lastReturnedUuids) state.lastReturnedUuids = {};
+        state.lastReturnedUuids[typeKey] = viz.uuid;
+      }
     }
 
     // Collect layer updates (from add_map_service_layer) before truncation
@@ -688,6 +786,13 @@ export async function runChatSession({
     pendingVisualizations: [],
     pendingLayerUpdates: [],
     pendingPatches: [],
+    // Plan 2026-05-07-002 Unit B: closed-vocabulary symbol dereference.
+    // Tracks the most recent UUID emitted by each create_* tool family,
+    // keyed by the type derived from `visualization.source`. Substituted
+    // into outgoing tool args before dispatch when the LLM emits a
+    // `{{last_<type>_uuid}}` placeholder for chained-UUID arguments.
+    // Per-session lifetime (lives for the whole runChatSession call).
+    lastReturnedUuids: {},
     // R16 — rejections the engine observed during this turn. Populated
     // from every patch_visualization tool call that returned an {error}
     // instead of a {patch_update}. Surfaced in the runChatSession return
