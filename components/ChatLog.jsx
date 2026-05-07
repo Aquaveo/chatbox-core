@@ -43,28 +43,29 @@ const bounce = keyframes`
   40% { transform: scale(1); opacity: 1; }
 `;
 
-const shimmer = keyframes`
-  0% { background-position: -200% 0; }
-  100% { background-position: 200% 0; }
-`;
-
 const ActivityStrip = styled.div`
   display: inline-flex;
   align-items: center;
   gap: 0.45rem;
-  padding: 0.2rem 0.6rem 0.2rem 0.5rem;
-  border-radius: ${({ theme }) => theme.radius.full};
-  background: ${({ theme }) => theme.colors.primaryLight};
-  color: ${({ theme }) => theme.colors.primary};
-  font-size: 0.78rem;
+  padding: 0.15rem 0.1rem 0.25rem;
+  color: ${({ theme }) => theme.colors.textMuted};
+  font-size: ${({ theme }) => theme.fontSize.sm};
   font-weight: 500;
   margin-bottom: 0.35rem;
   user-select: none;
 `;
 
+const ElapsedSuffix = styled.span`
+  color: ${({ theme }) => theme.colors.textMuted};
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+  margin-left: 0.25rem;
+  font-weight: 400;
+`;
+
 const LivePreview = styled.div`
   margin-top: 0.15rem;
-  font-size: 0.78rem;
+  font-size: ${({ theme }) => theme.fontSize.sm};
   line-height: 1.3;
   color: ${({ theme }) => theme.colors.textMuted};
   font-style: italic;
@@ -82,30 +83,14 @@ const Dots = styled.span`
 `;
 
 const Dot = styled.span`
-  width: 5px;
-  height: 5px;
+  width: 4px;
+  height: 4px;
   border-radius: 50%;
   background: currentColor;
   display: inline-block;
   animation: ${bounce} 1.3s ease-in-out infinite;
   &:nth-child(2) { animation-delay: 0.18s; }
   &:nth-child(3) { animation-delay: 0.36s; }
-`;
-
-const ActivityLabel = styled.span`
-  background: linear-gradient(
-    90deg,
-    currentColor 0%,
-    currentColor 40%,
-    rgba(255,255,255,0.85) 50%,
-    currentColor 60%,
-    currentColor 100%
-  );
-  background-size: 200% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: ${shimmer} 2.4s linear infinite;
 `;
 
 function getLastThinkingLine(buffer) {
@@ -141,8 +126,6 @@ function LiveActivity({ toolStatus, hasThinking, hasContent }) {
   else if (hasThinking) label = "Reasoning";
   else label = "Thinking";
 
-  const suffix = elapsed >= 3 ? ` · ${elapsed}s` : "";
-
   return (
     <ActivityStrip role="status" aria-live="polite">
       <Dots aria-hidden="true">
@@ -150,7 +133,8 @@ function LiveActivity({ toolStatus, hasThinking, hasContent }) {
         <Dot />
         <Dot />
       </Dots>
-      <ActivityLabel>{label}{suffix}</ActivityLabel>
+      <span>{label}</span>
+      {elapsed >= 3 && <ElapsedSuffix>{elapsed}s</ElapsedSuffix>}
     </ActivityStrip>
   );
 }
@@ -159,6 +143,16 @@ const ChatLog = forwardRef(function ChatLog(
   { messages, isEmbedded, loading, isThinkingEnabled, thinkingBuffer, contentBuffer, toolStatus, MessageRenderer },
   ref,
 ) {
+  // Streaming thinking dropdown opens by default so the user sees the
+  // live stream, but respects a manual collapse mid-stream. Without the
+  // user-collapsed state, every chunk re-render would re-assert the
+  // `open` attribute and fight the user's click. Reset on turn boundary
+  // (loading→false) so the next turn starts open again.
+  const [userCollapsedThinking, setUserCollapsedThinking] = useState(false);
+  useEffect(() => {
+    if (!loading) setUserCollapsedThinking(false);
+  }, [loading]);
+
   return (
     <LogSection ref={ref} role="log" aria-live="polite">
       {messages.map((message, index) => {
@@ -205,7 +199,10 @@ const ChatLog = forwardRef(function ChatLog(
               </LivePreview>
             )}
             {isThinkingEnabled && thinkingBuffer && (
-              <ThinkingDropdown>
+              <ThinkingDropdown
+                open={!userCollapsedThinking}
+                onToggle={(e) => setUserCollapsedThinking(!e.currentTarget.open)}
+              >
                 <summary>Thinking</summary>
                 <pre>{thinkingBuffer}</pre>
               </ThinkingDropdown>

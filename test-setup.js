@@ -68,3 +68,9 @@ if (typeof window !== "undefined") {
     configurable: true,
   });
 }
+
+// Tell React we're inside an act()-aware environment (jsdom-based
+// component tests). Without this, every render triggers a "current
+// testing environment is not configured to support act(...)" warning
+// to stderr, drowning real diagnostic output.
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;

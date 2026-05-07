@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Local-only review/run artifacts (ce:review, codex helpers, etc.)
+.context
+
 .env.production
 
 # Editor directories and files
