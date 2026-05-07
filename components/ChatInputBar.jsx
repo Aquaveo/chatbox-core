@@ -2,6 +2,15 @@ import { useRef, useCallback, useEffect } from "react";
 import styled from "styled-components";
 import ContextUsageIndicator from "./ContextUsageIndicator";
 
+// Cap the auto-resizing textarea at ~10 lines. Without this cap, a long
+// prompt grows the textarea unbounded, eats the chatbox Shell's
+// remaining height, and pushes the toolbar (send button, provider /
+// MCP / Thinking pills) below Shell's overflow:hidden boundary —
+// they get clipped out of view and the user can't send. Pixels (not
+// vh) because chatbox-core is embedded in narrow sidebars where vh
+// is dominated by the host viewport rather than the chatbox.
+export const TEXTAREA_MAX_PX = 240;
+
 const InputSection = styled.section`
   border: 1px solid ${({ theme }) => theme.colors.border};
   border-radius: ${({ theme }) => theme.radius.lg};
@@ -24,6 +33,8 @@ const Textarea = styled.textarea`
   box-sizing: border-box;
   resize: none;
   min-height: 44px;
+  max-height: ${TEXTAREA_MAX_PX}px;
+  overflow-y: auto;
   border: none;
   background: transparent;
   padding: ${({ theme }) => `${theme.spacing.md} 0.6rem`};
@@ -305,7 +316,7 @@ export default function ChatInputBar({
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = "auto";
-    el.style.height = `${el.scrollHeight}px`;
+    el.style.height = `${Math.min(el.scrollHeight, TEXTAREA_MAX_PX)}px`;
   }, [input]);
 
   return (
