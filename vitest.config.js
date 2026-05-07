@@ -17,8 +17,15 @@
  */
 
 import { defineConfig } from "vitest/config";
+import react from "@vitejs/plugin-react";
 
 export default defineConfig({
+  // Explicitly include the React plugin so JSX in test files (and the
+  // .jsx production files they import) compiles with the automatic
+  // runtime. vitest reads vite.config.js for resolver/transform but the
+  // `build.lib` entry block there does not propagate the plugin to the
+  // test pipeline reliably; declaring it here is the lightweight fix.
+  plugins: [react()],
   test: {
     // Default to node — pure-helper tests (helpers/url.test.js) don't need
     // a DOM and node is faster. Tests that touch window.location should

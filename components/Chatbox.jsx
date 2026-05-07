@@ -108,9 +108,63 @@ const Shell = styled.div`
   padding: 0.75rem;
   box-sizing: border-box;
   overflow: hidden;
-  justify-content: ${(props) => (props.$hasMessages ? "flex-start" : "flex-start")};
+  justify-content: flex-start;
   align-items: ${(props) => (props.$hasMessages ? "stretch" : "center")};
 `;
+
+const ExperimentalBar = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+  width: 100%;
+  padding: 0.25rem 0.6rem;
+  border: 1px solid ${({ theme }) => theme.colors.experimentalBorder};
+  background: ${({ theme }) => theme.colors.primaryLight};
+  color: ${({ theme }) => theme.colors.experimentalText};
+  border-radius: ${({ theme }) => theme.radius.sm};
+  font-size: 0.72rem;
+  line-height: 1.3;
+  user-select: none;
+`;
+
+const ExperimentalPill = styled.span`
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 0.65rem;
+  padding: 0.05rem 0.45rem;
+  border-radius: ${({ theme }) => theme.radius.full};
+  background: ${({ theme }) => theme.colors.experimentalText};
+  color: ${({ theme }) => theme.colors.surface};
+`;
+
+function ExperimentalBanner() {
+  return (
+    <ExperimentalBar role="note" aria-label="Experimental feature">
+      <ExperimentalPill aria-hidden="true">Beta</ExperimentalPill>
+      <span style={{ opacity: 0.85 }}>
+        Experimental — output may be incorrect. Verify before acting.
+      </span>
+    </ExperimentalBar>
+  );
+}
+
+// Centralizes the ThemeProvider + Shell + ExperimentalBanner triad so
+// every render path inherits the same chrome. Adding a fifth render
+// path is now a single ChatShell call instead of remembering to repeat
+// three pieces of structure.
+function ChatShell({ hasMessages, children }) {
+  return (
+    <ThemeProvider theme={chatTheme}>
+      <Shell $hasMessages={hasMessages}>
+        <ExperimentalBanner />
+        {children}
+      </Shell>
+    </ThemeProvider>
+  );
+}
 
 const WelcomeInputWrapper = styled.div`
   width: 100%;
@@ -782,42 +836,37 @@ export default function Chatbox({
 
   if (showProviderPanel) {
     return (
-      <ThemeProvider theme={chatTheme}>
-        <Shell $hasMessages>
-          <LLMProviderPanel
-            onSave={handleProviderSave}
-            onClose={() => setShowProviderPanel(false)}
-          />
-        </Shell>
-      </ThemeProvider>
+      <ChatShell hasMessages>
+        <LLMProviderPanel
+          onSave={handleProviderSave}
+          onClose={() => setShowProviderPanel(false)}
+        />
+      </ChatShell>
     );
   }
 
   if (showMcpPanel) {
     return (
-      <ThemeProvider theme={chatTheme}>
-        <Shell $hasMessages>
-          <MCPServerPanel
-            defaultServers={defaultMcpServers}
-            userServers={userMcpServers}
-            onAdd={handleAddMcpServer}
-            onRemove={handleRemoveMcpServer}
-            onToggle={handleToggleMcpServer}
-            onClose={() => setShowMcpPanel(false)}
-            statusMap={mcpStatus}
-            onRetry={handleRetry}
-            onPanelOpen={handlePanelOpen}
-          />
-        </Shell>
-      </ThemeProvider>
+      <ChatShell hasMessages>
+        <MCPServerPanel
+          defaultServers={defaultMcpServers}
+          userServers={userMcpServers}
+          onAdd={handleAddMcpServer}
+          onRemove={handleRemoveMcpServer}
+          onToggle={handleToggleMcpServer}
+          onClose={() => setShowMcpPanel(false)}
+          statusMap={mcpStatus}
+          onRetry={handleRetry}
+          onPanelOpen={handlePanelOpen}
+        />
+      </ChatShell>
     );
   }
 
   if (!hasMessages) {
     return (
-      <ThemeProvider theme={chatTheme}>
-        <Shell $hasMessages={false}>
-          <Welcome>
+      <ChatShell hasMessages={false}>
+        <Welcome>
             <WelcomeHeading>{welcomeHeading}</WelcomeHeading>
             {welcomeSubtitle && <WelcomeSub>{welcomeSubtitle}</WelcomeSub>}
             {suggestedPrompts.length > 0 && (
@@ -835,14 +884,12 @@ export default function Chatbox({
             )}
           </Welcome>
           <WelcomeInputWrapper>{inputBar}</WelcomeInputWrapper>
-        </Shell>
-      </ThemeProvider>
+      </ChatShell>
     );
   }
 
   return (
-    <ThemeProvider theme={chatTheme}>
-      <Shell $hasMessages>
+    <ChatShell hasMessages>
         <ChatLog
           ref={chatLogRef}
           messages={messages}
@@ -856,7 +903,6 @@ export default function Chatbox({
         />
         <ChatErrorPanel error={error} />
         {inputBar}
-      </Shell>
-    </ThemeProvider>
+    </ChatShell>
   );
 }

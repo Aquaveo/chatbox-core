@@ -253,6 +253,7 @@ const VisuallyHiddenLive = styled.div`
 `;
 
 const ARIA_LIVE_DEBOUNCE_MS = 500;
+const RECOMMENDED_ENABLED_SERVERS = 5;
 
 /**
  * Map internal scheduler state (from the probe scheduler's onUpdate and
@@ -322,6 +323,11 @@ export default function MCPServerPanel({
   const [formError, setFormError] = useState("");
   const [showCredentialAlert, setShowCredentialAlert] = useState(false);
   const [liveSummary, setLiveSummary] = useState("");
+  // Sticky-dismiss for the over-recommended notice. Resets only when
+  // the user crosses the threshold from below — so a user who dismisses
+  // and then enables another server gets the alert again. Closing and
+  // reopening the panel also resets (state is local to the mount).
+  const [overRecommendedDismissed, setOverRecommendedDismissed] = useState(false);
 
   // B16: fire onPanelOpen once per mount. Chatbox owns the "have we probed
   // this session" logic — the panel just announces the mount.
@@ -337,6 +343,19 @@ export default function MCPServerPanel({
     ],
     [defaultServers, userServers],
   );
+
+  const enabledCount = allServers.filter((s) => s.enabled !== false).length;
+  const overRecommended = enabledCount > RECOMMENDED_ENABLED_SERVERS;
+
+  // Re-arm the dismiss when the user falls back below the threshold,
+  // so the next time they cross it the alert returns.
+  const wasOverRef = useRef(overRecommended);
+  useEffect(() => {
+    if (wasOverRef.current && !overRecommended) {
+      setOverRecommendedDismissed(false);
+    }
+    wasOverRef.current = overRecommended;
+  }, [overRecommended]);
 
   // B16 — trailing 500 ms debounce on statusMap changes. Only enabled
   // servers are summarized so disabling a server doesn't cause an
@@ -412,6 +431,25 @@ export default function MCPServerPanel({
       <VisuallyHiddenLive role="status" aria-live="polite" aria-atomic="true">
         {liveSummary}
       </VisuallyHiddenLive>
+
+      {overRecommended && !overRecommendedDismissed && (
+        <DismissibleAlert role="status">
+          <AlertBody>
+            {enabledCount} servers enabled. We recommend at most{" "}
+            {RECOMMENDED_ENABLED_SERVERS} for reliable tool selection — every
+            connected server adds tools to each request, which can crowd the
+            model's context and degrade quality. Disable the ones you don't
+            need for this task.
+          </AlertBody>
+          <AlertDismissBtn
+            onClick={() => setOverRecommendedDismissed(true)}
+            aria-label="Dismiss server-count notice"
+            title="Dismiss"
+          >
+            &times;
+          </AlertDismissBtn>
+        </DismissibleAlert>
+      )}
 
       {showCredentialAlert && (
         <DismissibleAlert role="status">
@@ -516,6 +554,12 @@ export default function MCPServerPanel({
         />
         {formError && <FormError role="alert">{formError}</FormError>}
         <FormHint>Tip: append /sse or /mcp to skip fallback detection.</FormHint>
+        <FormHint>
+          Heads up: model context is finite. Each connected server adds tools
+          to every request, and tool-selection quality drops as the catalog
+          grows. We recommend keeping it to ~{RECOMMENDED_ENABLED_SERVERS}{" "}
+          servers — only enable the ones you need for the current task.
+        </FormHint>
         <AddButton type="submit" disabled={!url.trim()}>
           + Add Server
         </AddButton>

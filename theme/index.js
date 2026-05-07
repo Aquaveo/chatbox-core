@@ -33,11 +33,14 @@ const chatTheme = {
     errorBg: "#fff0f0",
     errorText: "#7d1d1d",
 
-    thinking: "#fff7e8",
-    thinkingBorder: "#d4bb8f",
-    thinkingBorderInner: "#e8d5b0",
-    thinkingText: "#8a6d3b",
-    thinkingTextHover: "#6b5230",
+    thinking: "#f4f6f8",
+    thinkingBorder: "#dce4ea",
+    thinkingBorderInner: "#e4ebf0",
+    thinkingText: "#5a6a78",
+    thinkingTextHover: "#1f7db8",
+
+    experimentalBorder: "rgba(31, 125, 184, 0.22)",
+    experimentalText: "#1f7db8",
 
     sendDisabled: "#c2d3de",
 
