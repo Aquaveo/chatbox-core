@@ -382,6 +382,36 @@ export async function executeTool(toolName, args, connections, toolServerMap) {
 // Provider-Agnostic Streaming (via adapters)
 // ---------------------------------------------------------------------------
 
+/**
+ * Empty-content guard for end-of-turn assistant text (bug 2026-05-08).
+ *
+ * When the LLM emits a final response with no tool calls AND no content,
+ * the engine must not push an empty assistant message into history — the
+ * chatbox renders that as an empty bubble, hiding whether the turn
+ * completed normally, aborted mid-task, or errored silently.
+ *
+ * Differentiates "did some work, ran dry of words" from "did nothing":
+ *   - Produced something this turn → "The model finished without further
+ *     explanation." Hints to the user that work happened but the model
+ *     went silent — they may want to ask for the rest if items are
+ *     missing.
+ *   - Produced nothing → "The model returned no response. Could you
+ *     rephrase?" Matches the existing tool-shape placeholder's tone.
+ *
+ * Pure helper — exported for direct testing.
+ */
+export function resolveEmptyAssistantText(rawText, state) {
+  if (typeof rawText === "string" && rawText.trim().length > 0) return rawText;
+  const producedSomething =
+    (state?.pendingVisualizations?.length ?? 0) > 0 ||
+    (state?.pendingLayerUpdates?.length ?? 0) > 0 ||
+    (state?.pendingPatches?.length ?? 0) > 0;
+  return producedSomething
+    ? "The model finished without further explanation."
+    : "The model returned no response. Could you rephrase?";
+}
+
+
 async function streamWithAdapter({
   messages, tools, model, thinkingEnabled,
   onThinkingChunk, onContentChunk, providerConfig, csrfToken, signal,
@@ -954,6 +984,13 @@ export async function runChatSession({
           assistantText = toolShape.stripped.trim()
             || "I tried to use a tool but couldn't complete the request. Could you rephrase?";
         }
+        // Empty-content guard (2026-05-08): some models (observed:
+        // gpt-oss:120b on multi-item prompts) end a turn with no tool
+        // calls AND empty content — silent abort mid-task. Without this
+        // guard, the chatbox renders an empty assistant bubble and the
+        // user can't tell whether the system completed normally or
+        // dropped the rest of the work.
+        assistantText = resolveEmptyAssistantText(assistantText, state);
         messages.push({ role: "assistant", content: assistantText });
         return {
           assistantText,
