@@ -5,8 +5,12 @@
  * All runtime configuration flows through <Chatbox> props or localStorage.
  */
 
-// MCP connection defaults (override via mcpServerUrl / mcpServers props)
-export const DEFAULT_MCP_SERVER_URL = "/sse";
+// MCP connection defaults (override via mcpServerUrl / mcpServers props).
+// Default path is `/mcp` (Streamable HTTP) — the modern default for
+// FastMCP servers, matching `nrds-mcps` (2026-05-02) and tethysdash
+// (2026-05-08). The transport selector at engine/transports.js still
+// supports legacy `/sse` URLs unchanged for backwards compatibility.
+export const DEFAULT_MCP_SERVER_URL = "/mcp";
 export const MAX_TOOL_REPAIR_ATTEMPTS = 0;
 
 // Context window budget (reserve 20% for the model's response)

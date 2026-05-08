@@ -61,7 +61,7 @@ function App() {
 | `modelOptions` | `string[]` | `[model]` | Fallback model list shown when discovery fails or as extras in the dropdown. |
 | `thinkingEnabled` | `boolean` | `false` | Enable thinking/reasoning mode. |
 | `prompt` | `string` | `""` | Pre-filled input text. |
-| `mcpServerUrl` | `string` | `"/sse"` | Single MCP server SSE endpoint. |
+| `mcpServerUrl` | `string` | `"/mcp"` | Single MCP server endpoint. Streamable HTTP by default; suffix `/sse` to force the legacy SSE transport for compatibility. |
 | `mcpServers` | `Array<{url, name}>` | `[]` | Multiple MCP servers. Overrides `mcpServerUrl` if provided. |
 | `engineExtensions` | `object` | `{}` | Strategy-pattern hooks for domain-specific behavior (see [Engine Extensions](#engine-extensions)). |
 | `onResult` | `function` | `null` | Callback after each chat turn: `(result, { isEmbedded, updateVariableInputValues }) => void`. |
