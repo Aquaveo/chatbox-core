@@ -1,8 +1,14 @@
-import { forwardRef, useEffect, useState } from "react";
+import { forwardRef, useEffect, useRef, useState } from "react";
 import styled, { keyframes } from "styled-components";
 import ChatMessage from "./ChatMessage";
 import MarkdownContent from "./markdownContent";
 import { Avatar, Bubble, ThinkingDropdown, BotIcon } from "./ChatMessage";
+import { statusToLabel } from "../helpers/toolStatusCopy";
+
+// Plan 2026-05-08-003 — how long a tool_complete label persists before
+// reverting to "Thinking..." when no other event has landed. Long enough
+// to read a glance, short enough to feel responsive.
+const COMPLETION_GRACE_MS = 1500;
 
 const LogSection = styled.section`
   display: grid;
@@ -118,10 +124,62 @@ function useElapsedSeconds(active) {
   return elapsed;
 }
 
+/**
+ * Hold a tool_complete label for COMPLETION_GRACE_MS so the user perceives
+ * it as a discrete event, not a flash. If a new event lands within the
+ * grace window, the new event wins (no queue — most-recent-event wins
+ * semantics, plan K2).
+ *
+ * Returns the label string to display, or null when no specific label
+ * should override the default (caller falls back to "Thinking" /
+ * "Reasoning" / "Generating" based on engine state).
+ */
+function useStickyStatusLabel(toolStatus) {
+  const [stickyLabel, setStickyLabel] = useState(null);
+  const timerRef = useRef(null);
+
+  useEffect(() => {
+    // New event lands — cancel any pending grace-revert.
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+
+    const label = statusToLabel(toolStatus);
+    if (label === null) {
+      // Suppressed / unknown — clear immediately.
+      setStickyLabel(null);
+      return undefined;
+    }
+
+    setStickyLabel(label);
+
+    if (toolStatus?.type === "tool_complete") {
+      // Grace window: revert to default after the timeout unless another
+      // event arrives and resets us.
+      timerRef.current = setTimeout(() => {
+        setStickyLabel(null);
+        timerRef.current = null;
+      }, COMPLETION_GRACE_MS);
+    }
+
+    return () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, [toolStatus]);
+
+  return stickyLabel;
+}
+
 function LiveActivity({ toolStatus, hasThinking, hasContent }) {
   const elapsed = useElapsedSeconds(true);
+  const stickyLabel = useStickyStatusLabel(toolStatus);
+
   let label;
-  if (toolStatus === "calling_tools") label = "Running tools";
+  if (stickyLabel) label = stickyLabel;
   else if (hasContent) label = "Generating";
   else if (hasThinking) label = "Reasoning";
   else label = "Thinking";
