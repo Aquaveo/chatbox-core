@@ -243,9 +243,21 @@ export default function Chatbox({
   welcomeHeading = "Ask me anything",
   welcomeSubtitle = "I can call tools from your connected MCP servers to help you build and edit.",
   suggestedPrompts = DEFAULT_SUGGESTED_PROMPTS,
+  // Plan 2026-05-08-004 — controlled-component-lite persistence hooks.
+  // `initialMessages` hydrates the conversation on first mount; the
+  // engine's history ref is also seeded so the first turn after
+  // hydration has full prior context. `onMessagesChange` fires
+  // whenever the internal `messages` state mutates so the host can
+  // persist (e.g., to localStorage). Both are optional; defaults
+  // preserve today's ephemeral-conversation behavior.
+  // For per-instance restart on identity change (dashboard switch),
+  // hosts pass `key={someId}` so React tears down + remounts and
+  // `initialMessages` is read fresh from the new context.
+  initialMessages = [],
+  onMessagesChange,
 }) {
   const isEmbedded = typeof updateVariableInputValues === "function";
-  const [messages, setMessages] = useState([]);
+  const [messages, setMessages] = useState(initialMessages);
   const [input, setInput] = useState(prompt);
   const [thinkingBuffer, setThinkingBuffer] = useState("");
   const [contentBuffer, setContentBuffer] = useState("");
@@ -260,7 +272,12 @@ export default function Chatbox({
   const [providerConfig, setProviderConfig] = useState(() => getProviderConfig());
   const [showProviderPanel, setShowProviderPanel] = useState(false);
   const [userMcpServers, setUserMcpServers] = useState(() => getMcpServers());
-  const engineMessagesRef = useRef([]);
+  // Plan 2026-05-08-004 — seed the engine's history ref from
+  // initialMessages so the first turn after hydration has full prior
+  // context. Without this, a hydrated chatbox renders the prior
+  // conversation visually but the engine sends an empty history on the
+  // next turn, losing context.
+  const engineMessagesRef = useRef(initialMessages);
   const [contextUsage, setContextUsage] = useState({ used: 0, total: 0 });
 
   // MCP health-probe state (Unit 4). The Map is the single source of truth
@@ -449,6 +466,24 @@ export default function Chatbox({
     const el = chatLogRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, thinkingBuffer, contentBuffer]);
+
+  // Plan 2026-05-08-004 — fire `onMessagesChange` whenever the
+  // conversation state mutates so the host can persist (e.g., to
+  // localStorage). Wrapped in try/catch so a host-side bug cannot
+  // crash the chatbox. Fires on every change INCLUDING the initial
+  // mount-with-hydrated-data case — the host receives whatever was
+  // just hydrated, which is a no-op-equivalent re-save when the
+  // initialMessages came from the same storage. No debounce: writes
+  // are cheap; a turn produces ~3-5 mutations.
+  useEffect(() => {
+    if (!onMessagesChange) return;
+    try {
+      onMessagesChange(messages);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("[chatbox-core] onMessagesChange callback threw:", err);
+    }
+  }, [messages, onMessagesChange]);
 
   // Sync props
   useEffect(() => { setInput(prompt ?? ""); }, [prompt]);
