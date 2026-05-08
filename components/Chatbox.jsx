@@ -517,13 +517,18 @@ export default function Chatbox({
         // Inject domain-specific extensions (empty for generic sidebar)
         ...engineExtensions,
         onToolStatus: (status) => {
+          // Plan 2026-05-08-003: payload is now per-tool —
+          //   {type: "tool_start" | "tool_complete", toolName, success?}
+          //   (or null when no event has fired this turn).
+          // The previous string shape ("calling_tools" / null) is gone;
+          // downstream consumers that did `if (toolStatus)` continue to
+          // work because tool_start payloads are truthy.
           setToolStatus(status);
-          // Round-boundary buffer reset: when tools finish and the engine
-          // is about to stream the next assistant round, clear the
-          // accumulators so LiveActivity / LivePreview reflect only the
-          // current round's thinking and content, not stale text from
-          // the previous round.
-          if (status === null) {
+          // Round-boundary buffer reset: when tools start running, clear
+          // the assistant text accumulators so LivePreview reflects only
+          // the current round's thinking. Use tool_start as the trigger
+          // — equivalent to the old "calling_tools" signal.
+          if (status?.type === "tool_start") {
             accumulatedThinking = "";
             accumulatedContent = "";
             setThinkingBuffer("");

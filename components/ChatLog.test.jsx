@@ -132,3 +132,118 @@ describe("ChatLog LiveActivity ElapsedSuffix", () => {
     expect(container.textContent).toMatch(/3s/);
   });
 });
+
+describe("ChatLog LiveActivity per-tool status (plan 2026-05-08-003)", () => {
+  it("renders 'Thinking' as the default label when toolStatus is null", () => {
+    const { container } = render(<ChatLog {...baseProps} thinkingBuffer="" />);
+    expect(container.textContent).toMatch(/Thinking/);
+  });
+
+  it("renders the tool start friendly text on tool_start", () => {
+    const { container } = render(
+      <ChatLog
+        {...baseProps}
+        thinkingBuffer=""
+        toolStatus={{ type: "tool_start", toolName: "create_map_visualization" }}
+      />,
+    );
+    expect(container.textContent).toMatch(/Creating map\.\.\./);
+  });
+
+  it("renders the tool complete friendly text on tool_complete success", () => {
+    const { container } = render(
+      <ChatLog
+        {...baseProps}
+        thinkingBuffer=""
+        toolStatus={{ type: "tool_complete", toolName: "create_map_visualization", success: true }}
+      />,
+    );
+    expect(container.textContent).toMatch(/Map created/);
+  });
+
+  it("renders 'Failed: ...' on tool_complete success: false", () => {
+    const { container } = render(
+      <ChatLog
+        {...baseProps}
+        thinkingBuffer=""
+        toolStatus={{ type: "tool_complete", toolName: "create_plotly_chart", success: false }}
+      />,
+    );
+    expect(container.textContent).toMatch(/Failed: creating chart/);
+  });
+
+  it("reverts to the default label after the grace window expires", () => {
+    vi.useFakeTimers();
+    // Hold a stable reference for toolStatus — in production, setToolStatus
+    // only fires when a NEW event arrives, so the prop doesn't change
+    // identity until a new event lands. New-object-per-rerender would
+    // re-run the effect and re-schedule the grace timer indefinitely.
+    const stableStatus = {
+      type: "tool_complete",
+      toolName: "create_map_visualization",
+      success: true,
+    };
+    const { container } = render(
+      <ChatLog {...baseProps} thinkingBuffer="" toolStatus={stableStatus} />,
+    );
+    expect(container.textContent).toMatch(/Map created/);
+
+    // Advance past the grace window — timer fires, setStickyLabel(null)
+    // schedules a re-render with sticky cleared. Falls back to "Thinking".
+    act(() => {
+      vi.advanceTimersByTime(1600);
+    });
+    expect(container.textContent).toMatch(/Thinking/);
+    expect(container.textContent).not.toMatch(/Map created/);
+  });
+
+  it("most-recent-event wins: a new tool_start cancels a pending grace timer", () => {
+    vi.useFakeTimers();
+    const { container, rerender } = render(
+      <ChatLog
+        {...baseProps}
+        thinkingBuffer=""
+        toolStatus={{ type: "tool_complete", toolName: "create_map_visualization", success: true }}
+      />,
+    );
+    expect(container.textContent).toMatch(/Map created/);
+
+    // Within the grace window, a new tool starts.
+    act(() => {
+      vi.advanceTimersByTime(500);
+    });
+    rerender(
+      <ChatLog
+        {...baseProps}
+        thinkingBuffer=""
+        toolStatus={{ type: "tool_start", toolName: "add_wms_layer" }}
+      />,
+    );
+    expect(container.textContent).toMatch(/Adding WMS layer\.\.\./);
+    expect(container.textContent).not.toMatch(/Map created/);
+  });
+
+  it("falls back to humanized name for unknown tools", () => {
+    const { container } = render(
+      <ChatLog
+        {...baseProps}
+        thinkingBuffer=""
+        toolStatus={{ type: "tool_start", toolName: "create_widget" }}
+      />,
+    );
+    expect(container.textContent).toMatch(/Creating widget\.\.\./);
+  });
+
+  it("uses default fallback when statusToLabel returns null (suppressed entry)", () => {
+    const { container } = render(
+      <ChatLog
+        {...baseProps}
+        thinkingBuffer=""
+        toolStatus={{ type: "tool_start", toolName: "call_tool" }}
+      />,
+    );
+    // call_tool's start is suppressed (start: null in mapping) so we fall
+    // through to the default — no thinking buffer + no content = "Thinking".
+    expect(container.textContent).toMatch(/Thinking/);
+  });
+});

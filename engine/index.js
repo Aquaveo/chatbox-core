@@ -488,11 +488,25 @@ function _substituteLastUuidPlaceholders(value, lastReturnedUuids) {
 
 export async function processToolCalls(
   toolCalls, messages, connections, toolServerMap, state, originalUserText,
-  { toolCategories, beforeToolExecution, toolErrorCheck, afterToolExecution },
+  { toolCategories, beforeToolExecution, toolErrorCheck, afterToolExecution, onToolStatus },
 ) {
   let hadError = false;
   let lastErr = null;
   const failedSignatures = [];
+
+  // Plan 2026-05-08-003 — per-tool status events for the chatbox progress
+  // indicator. Wrapped to swallow host callback errors so a bug in the host
+  // can't abort the engine loop.
+  const fireStatus = (payload) => {
+    if (!onToolStatus) return;
+    try {
+      onToolStatus(payload);
+    } catch (err) {
+      // Host bug — log and continue.
+      // eslint-disable-next-line no-console
+      console.warn("[chatbox-core] onToolStatus callback threw:", err);
+    }
+  };
 
   for (const toolCall of toolCalls) {
     let toolName = toolCall?.function?.name;
@@ -529,7 +543,24 @@ export async function processToolCalls(
       _substituteLastUuidPlaceholders(args, state.lastReturnedUuids);
     }
 
-    const toolResult = await executeTool(toolName, args, connections, toolServerMap);
+    fireStatus({ type: "tool_start", toolName });
+    let toolResult;
+    try {
+      toolResult = await executeTool(toolName, args, connections, toolServerMap);
+    } catch (err) {
+      // Fire a failure status so the indicator flashes "Failed: ..."
+      // before the exception propagates and the turn aborts.
+      fireStatus({ type: "tool_complete", toolName, success: false });
+      throw err;
+    }
+    // Domain-error envelopes (`{error: "..."}`) count as failures for the
+    // status indicator; the user wants to know the tool didn't do what it
+    // was supposed to. Other shapes are treated as success.
+    const isDomainError =
+      toolResult !== null &&
+      typeof toolResult === "object" &&
+      typeof toolResult.error === "string";
+    fireStatus({ type: "tool_complete", toolName, success: !isDomainError });
 
     // Unit A1 / K14 — append per-turn tool-call entry. Used by the host
     // UI to evaluate the dispatch-feedback banner trigger (was a
@@ -961,12 +992,12 @@ export async function runChatSession({
       });
 
       // All tool calls go directly to MCP servers — no discover_tools interception.
-      onToolStatus?.("calling_tools");
+      // Plan 2026-05-08-003: per-round "calling_tools"/null toggle replaced
+      // with per-tool start/complete events fired from inside processToolCalls.
       let { hadError, lastErr, failedSignatures } = await processToolCalls(
         toolCalls, messages, connections, toolServerMap, state, text,
-        { toolCategories, beforeToolExecution, toolErrorCheck, afterToolExecution },
+        { toolCategories, beforeToolExecution, toolErrorCheck, afterToolExecution, onToolStatus },
       );
-      onToolStatus?.(null);
 
       // Plan 002 — auto-learn signal: a turn that successfully called
       // tools (even tools that returned domain {error} envelopes — those
@@ -1091,12 +1122,12 @@ export async function runChatSession({
             tool_calls: repairCalls,
           });
 
-          onToolStatus?.("calling_tools");
+          // Plan 2026-05-08-003: per-tool events fire from inside
+          // processToolCalls; no per-round toggle needed here.
           ({ hadError, lastErr, failedSignatures } = await processToolCalls(
             repairCalls, messages, connections, toolServerMap, state, text,
-            { toolCategories, beforeToolExecution, toolErrorCheck, afterToolExecution },
+            { toolCategories, beforeToolExecution, toolErrorCheck, afterToolExecution, onToolStatus },
           ));
-          onToolStatus?.(null);
 
           for (const sig of failedSignatures) {
             failedSigCounts[sig] = (failedSigCounts[sig] ?? 0) + 1;
