@@ -546,14 +546,14 @@ export default function MCPServerPanel({
           onChange={(e) => setName(e.target.value)}
         />
         <Input
-          placeholder="Server URL (e.g., http://localhost:9000/sse)"
+          placeholder="Server URL (e.g., http://localhost:9000/mcp)"
           value={url}
           onChange={(e) => setUrl(e.target.value)}
           required
           aria-invalid={formError ? "true" : "false"}
         />
         {formError && <FormError role="alert">{formError}</FormError>}
-        <FormHint>Tip: append /sse or /mcp to skip fallback detection.</FormHint>
+        <FormHint>Tip: append /mcp or /sse to skip fallback detection.</FormHint>
         <FormHint>
           Heads up: model context is finite. Each connected server adds tools
           to every request, and tool-selection quality drops as the catalog
