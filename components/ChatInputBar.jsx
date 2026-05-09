@@ -1,6 +1,13 @@
-import { useRef, useCallback, useEffect } from "react";
-import styled from "styled-components";
+import { useRef, useCallback, useEffect, useState, useLayoutEffect, useId } from "react";
+import ReactDOM from "react-dom";
+import styled, { keyframes } from "styled-components";
 import ContextUsageIndicator from "./ContextUsageIndicator";
+
+// Slash-trigger regex (R5): empty input or `/<token>` only — `[A-Za-z0-9_-]`
+// after the leading `/`. Mid-input slashes (e.g., URLs) and a `/` followed
+// by any non-token char (space, second `/` in `/etc/passwd`, etc.) all fall
+// through to the closed branch. See plan 2026-05-08-005, R5 + Risks table.
+const SLASH_TRIGGER_RE = /^\/[A-Za-z0-9_-]*$/;
 
 // Cap the auto-resizing textarea at ~10 lines. Without this cap, a long
 // prompt grows the textarea unbounded, eats the chatbox Shell's
@@ -274,6 +281,80 @@ const SettingsIcon = () => (
   </svg>
 );
 
+/* --- Slash-command popover --- */
+
+// Inline-popover JSX rendered via React portal to escape the chatbox
+// Shell's `overflow: hidden` clipping (precedent: the textarea-clipping
+// bug in Plan 26-002). Anchored above the textarea via a fixed-position
+// wrapper sized from `getBoundingClientRect()`. v1 closes on any reflow
+// (resize / scroll / visualViewport change) — does not re-anchor.
+
+const PopoverWrap = styled.div.attrs((props) => ({
+  style: {
+    left: `${props.$left}px`,
+    top: `${props.$top}px`,
+    width: `${props.$width}px`,
+  },
+}))`
+  position: fixed;
+  z-index: 9999;
+  background: ${({ theme }) => theme.colors.surface};
+  border: 1px solid ${({ theme }) => theme.colors.border};
+  border-radius: ${({ theme }) => theme.radius.md};
+  box-shadow: 0 4px 16px rgba(20, 35, 60, 0.18);
+  max-height: 240px;
+  overflow-y: auto;
+  padding: ${({ theme }) => theme.spacing.xs} 0;
+  /* Translate Y -100% so the popover hovers above the textarea anchor
+     point (top of textarea) — mirrors the visual position of typical
+     command-palette popovers. The 6px gap is intentional. */
+  transform: translateY(calc(-100% - 6px));
+`;
+
+const PopoverRow = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: ${({ theme }) => `${theme.spacing.sm} ${theme.spacing.md}`};
+  cursor: pointer;
+  background: ${(props) => (props.$highlighted ? props.theme.colors.primaryLight : "transparent")};
+  &:hover {
+    background: ${({ theme }) => theme.colors.primaryLight};
+  }
+`;
+
+const PopoverRowName = styled.div`
+  display: flex;
+  align-items: center;
+  gap: ${({ theme }) => theme.spacing.sm};
+  font-weight: 600;
+  font-size: ${({ theme }) => theme.fontSize.base};
+  color: ${(props) => (props.$highlighted ? props.theme.colors.primary : props.theme.colors.text)};
+`;
+
+const PopoverRowDesc = styled.div`
+  font-size: ${({ theme }) => theme.fontSize.sm};
+  color: ${({ theme }) => theme.colors.textMuted};
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+`;
+
+const popoverSpin = keyframes`
+  to { transform: rotate(360deg); }
+`;
+
+const RowSpinner = styled.span`
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: ${popoverSpin} 0.8s linear infinite;
+  flex-shrink: 0;
+`;
+
 export default function ChatInputBar({
   input,
   setInput,
@@ -292,17 +373,232 @@ export default function ChatInputBar({
   showProviderPanel,
   onToggleProviderPanel,
   providerConfig,
+  prompts = [],
+  onPromptSelected = () => Promise.resolve(),
 }) {
   const textareaRef = useRef(null);
 
+  // Slash-command popover state. `popoverOpen` and `triggerToken` are
+  // derived from the controlled `input` value via the regex below.
+  // `highlightedIndex` is reset whenever the filtered list changes shape.
+  // `loadingPromptName` shows a spinner on a row while the host's
+  // `onPromptSelected` is in flight.
+  // `selectionGen` is incremented on every selection; the async resolver
+  // captures the gen at click time and drops the result if it's stale
+  // (Esc'd, typed-over, double-clicked, or another row picked).
+  const [popoverOpen, setPopoverOpen] = useState(false);
+  const [triggerToken, setTriggerToken] = useState("");
+  const [highlightedIndex, setHighlightedIndex] = useState(0);
+  const [loadingPromptName, setLoadingPromptName] = useState(null);
+  const [anchor, setAnchor] = useState({ left: 0, top: 0, width: 0 });
+  const selectionGen = useRef(0);
+  // Sticky-Esc marker: captures the triggerToken at the moment Esc fires
+  // so the detection effect doesn't immediately re-open the popover for
+  // the same input. Cleared when the input no longer matches the slash
+  // regex OR the user types a different token (token diverges).
+  const dismissedTokenRef = useRef(null);
+
+  const popoverId = useId();
+  const rowId = useCallback((idx) => `${popoverId}-row-${idx}`, [popoverId]);
+
+  const promptsAvailable = prompts.length > 0;
+
+  // Case-insensitive prefix-match against prompt.name.
+  const filteredPrompts = (() => {
+    if (!popoverOpen) return [];
+    const tok = triggerToken.toLowerCase();
+    if (!tok) return prompts;
+    return prompts.filter((p) =>
+      typeof p?.name === "string" && p.name.toLowerCase().startsWith(tok),
+    );
+  })();
+
+  // R5 — initial render & live edits. Evaluating the regex on every
+  // render of the controlled `input` covers Plan-004's per-dashboard
+  // remount-with-persisted-draft case (mounting with `/plot` already
+  // in the textarea opens the popover automatically).
+  useEffect(() => {
+    if (!promptsAvailable) {
+      // Defensive: even if a stale popover-open flag exists, no prompts
+      // means no popover. Match the R10 silent-fallback contract.
+      if (popoverOpen) setPopoverOpen(false);
+      // Without prompts there is no slash flow at all — clear the marker.
+      dismissedTokenRef.current = null;
+      return;
+    }
+    const match = SLASH_TRIGGER_RE.test(input);
+    if (match) {
+      const token = input.slice(1);
+      // If the user diverged from the dismissed token (typed a different
+      // character after Esc), clear the marker so the popover re-opens.
+      if (
+        dismissedTokenRef.current !== null &&
+        dismissedTokenRef.current !== token
+      ) {
+        dismissedTokenRef.current = null;
+      }
+      // Reset highlight when the candidate list might have shifted.
+      setTriggerToken((prev) => (prev === token ? prev : token));
+      // Sticky-Esc: if the user dismissed this exact token with Esc,
+      // do NOT re-open the popover until the input changes shape.
+      if (dismissedTokenRef.current === token) {
+        return;
+      }
+      if (!popoverOpen) {
+        setPopoverOpen(true);
+        setHighlightedIndex(0);
+      }
+    } else {
+      // Input no longer matches the slash regex — clear the dismissal
+      // marker so a future `/<token>` re-opens cleanly.
+      dismissedTokenRef.current = null;
+      if (popoverOpen) setPopoverOpen(false);
+    }
+  }, [input, promptsAvailable, popoverOpen]);
+
+  // Close popover when filtered list becomes empty (zero-match KTD —
+  // no "No matches" text in v1). Sticky-dismiss the current token so
+  // the detection effect doesn't immediately reopen against the same
+  // input — it only re-opens after the user changes the token shape.
+  useEffect(() => {
+    if (popoverOpen && filteredPrompts.length === 0 && triggerToken !== "") {
+      dismissedTokenRef.current = triggerToken;
+      setPopoverOpen(false);
+    } else if (popoverOpen && highlightedIndex >= filteredPrompts.length) {
+      // Clamp highlight if list shrank under it.
+      setHighlightedIndex(Math.max(0, filteredPrompts.length - 1));
+    }
+  }, [popoverOpen, filteredPrompts.length, triggerToken, highlightedIndex]);
+
+  // R6 anchor coords — read textarea bounds when the popover opens.
+  useLayoutEffect(() => {
+    if (!popoverOpen) return;
+    const el = textareaRef.current;
+    if (!el || typeof el.getBoundingClientRect !== "function") return;
+    const rect = el.getBoundingClientRect();
+    setAnchor({ left: rect.left, top: rect.top, width: rect.width });
+  }, [popoverOpen]);
+
+  // R6 reflow handling — any resize / scroll / visualViewport change
+  // closes the popover. v1 does not re-anchor. Sticky-dismiss the
+  // current token so the detection effect doesn't immediately reopen
+  // for the same input.
+  useEffect(() => {
+    if (!popoverOpen) return undefined;
+    const close = () => {
+      dismissedTokenRef.current = triggerToken;
+      setPopoverOpen(false);
+    };
+    window.addEventListener("resize", close);
+    document.addEventListener("scroll", close, true);
+    const vv = typeof window !== "undefined" ? window.visualViewport : null;
+    if (vv) {
+      vv.addEventListener("resize", close);
+      vv.addEventListener("scroll", close);
+    }
+    return () => {
+      window.removeEventListener("resize", close);
+      document.removeEventListener("scroll", close, true);
+      if (vv) {
+        vv.removeEventListener("resize", close);
+        vv.removeEventListener("scroll", close);
+      }
+    };
+  }, [popoverOpen, triggerToken]);
+
+  const selectPrompt = useCallback(
+    (prompt) => {
+      if (!prompt) return;
+      const gen = ++selectionGen.current;
+      const tokenAtSelect = triggerToken;
+      setLoadingPromptName(prompt.name);
+      // Call onPromptSelected synchronously so the host's pending
+      // resolver is captured immediately (matters for tests that hold a
+      // resolveFn ref + drives behavior on the parent setInput call).
+      // Use new Promise to route synchronous throws to the reject branch.
+      new Promise((resolve, reject) => {
+        try {
+          resolve(onPromptSelected(prompt));
+        } catch (err) {
+          reject(err);
+        }
+      }).then(
+          () => {
+            // Late-arrival guard: bail if the user has Esc'd, typed-over,
+            // or selected a different row in the meantime.
+            const stillCurrent =
+              gen === selectionGen.current &&
+              popoverOpen &&
+              triggerToken === tokenAtSelect;
+            setLoadingPromptName((curr) => (curr === prompt.name ? null : curr));
+            if (!stillCurrent) {
+              // Drop the result; do NOT call any host success path here
+              // — the host's success path runs inside onPromptSelected
+              // itself, which is bypassed by the host's own race guard
+              // OR this guard's stillCurrent check on the parent side.
+              return;
+            }
+            // Close popover on success. If the host replaced `input`
+            // via setInput inside onPromptSelected, the regex no longer
+            // matches and the detection effect won't re-open. If the
+            // host didn't replace the input (e.g., custom flow), mark
+            // the current token as dismissed so the detection effect
+            // doesn't immediately re-open against the same `/`<token>.
+            dismissedTokenRef.current = tokenAtSelect;
+            setPopoverOpen(false);
+          },
+          () => {
+            // Reject path: clear loading; close popover so the host's
+            // error message is visible above the input bar. Sticky-mark
+            // the token so the detection effect doesn't reopen.
+            setLoadingPromptName((curr) => (curr === prompt.name ? null : curr));
+            dismissedTokenRef.current = tokenAtSelect;
+            setPopoverOpen(false);
+          },
+        );
+    },
+    [onPromptSelected, popoverOpen, triggerToken],
+  );
+
   const handleKeyDown = useCallback(
     (e) => {
+      if (popoverOpen && filteredPrompts.length > 0) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          setHighlightedIndex((idx) => Math.min(idx + 1, filteredPrompts.length - 1));
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          setHighlightedIndex((idx) => Math.max(idx - 1, 0));
+          return;
+        }
+        if (e.key === "Enter" || e.key === "Tab") {
+          e.preventDefault();
+          // Tab also stops native focus traversal (preventDefault above).
+          const prompt = filteredPrompts[highlightedIndex];
+          selectPrompt(prompt);
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          // Sticky-Esc: capture the current triggerToken so the detection
+          // effect doesn't immediately re-open the popover. Cleared when
+          // the user backspaces to an empty/non-matching input or types
+          // a different token.
+          dismissedTokenRef.current = triggerToken;
+          setPopoverOpen(false);
+          return;
+        }
+      }
+      // Default behavior when popover is closed (or no matches).
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         onSend();
       }
     },
-    [onSend],
+    [onSend, popoverOpen, filteredPrompts, highlightedIndex, selectPrompt, triggerToken],
   );
 
   const handleInput = useCallback(
@@ -318,6 +614,10 @@ export default function ChatInputBar({
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, TEXTAREA_MAX_PX)}px`;
   }, [input]);
+
+  const placeholder = promptsAvailable
+    ? "Send a message… or / for templates"
+    : "Send a message…";
 
   return (
     <InputSection>
@@ -347,14 +647,66 @@ export default function ChatInputBar({
       </ModelRow>
       <Textarea
         ref={textareaRef}
-        placeholder="Send a message…"
+        placeholder={placeholder}
         rows={1}
         value={input}
         onChange={handleInput}
         onKeyDown={handleKeyDown}
         disabled={loading}
         aria-label="Chat message input"
+        role="combobox"
+        aria-expanded={popoverOpen}
+        aria-controls={popoverId}
+        aria-autocomplete="list"
+        aria-activedescendant={
+          popoverOpen && filteredPrompts.length > 0
+            ? rowId(highlightedIndex)
+            : undefined
+        }
       />
+      {popoverOpen && filteredPrompts.length > 0 &&
+        typeof document !== "undefined" &&
+        ReactDOM.createPortal(
+          <PopoverWrap
+            id={popoverId}
+            role="listbox"
+            $left={anchor.left}
+            $top={anchor.top}
+            $width={anchor.width}
+          >
+            {filteredPrompts.map((prompt, idx) => {
+              const isHighlighted = idx === highlightedIndex;
+              const isRowLoading = loadingPromptName === prompt.name;
+              return (
+                <PopoverRow
+                  key={prompt.name}
+                  id={rowId(idx)}
+                  role="option"
+                  tabIndex={-1}
+                  aria-selected={isHighlighted}
+                  $highlighted={isHighlighted}
+                  onMouseDown={(e) => {
+                    // Prevent the textarea from losing focus on click —
+                    // otherwise the parent's selection handler would
+                    // race against blur side-effects.
+                    e.preventDefault();
+                  }}
+                  onMouseEnter={() => setHighlightedIndex(idx)}
+                  onClick={() => selectPrompt(prompt)}
+                >
+                  <PopoverRowName $highlighted={isHighlighted}>
+                    <span>{prompt.name}</span>
+                    {isRowLoading && <RowSpinner aria-label="Loading" />}
+                  </PopoverRowName>
+                  {prompt.description && (
+                    <PopoverRowDesc>{prompt.description}</PopoverRowDesc>
+                  )}
+                </PopoverRow>
+              );
+            })}
+          </PopoverWrap>,
+          document.body,
+        )}
       <Toolbar>
         <Toggles>
           <PillButton
