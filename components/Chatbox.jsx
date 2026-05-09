@@ -489,17 +489,52 @@ export default function Chatbox({
   }, [allMcpServers]);
 
   // Plan 2026-05-08-005 Unit 4 — selection handler. Looks up the source
-  // server via promptServerMap, calls getPrompt, writes the rendered
-  // text into the input, and clears any prior error on success.
-  // Failures surface a one-line user-facing message via setError; the
-  // underlying error is also console.error'd so devtools-savvy users
-  // and support staff can self-diagnose without changing user copy
-  // (per the brainstorm's MCP-error-envelope learnings).
+  // server via promptServerMap, calls getPrompt with synthesized
+  // bracket placeholders for every `required: true` argument, writes
+  // the rendered text into the input, and clears any prior error on
+  // success. Failures surface a one-line user-facing message via
+  // setError; the underlying error is also console.error'd so
+  // devtools-savvy users and support staff can self-diagnose without
+  // changing user copy (per the brainstorm's MCP-error-envelope
+  // learnings).
+  //
+  // **Why synthesize brackets client-side**: third-party MCP servers
+  // (mta-subway-mcp-server, etc.) declare prompt args as
+  // `required: true` with no defaults and validate strictly with Zod.
+  // Calling `prompts/get(name, {})` on those servers raises -32602.
+  // The synth generalizes the K4 placeholder convention from plan-005
+  // (originally NRDS-only) to ANY MCP server: each required arg gets
+  // `[<arg.description>]` (or `[<arg.name>]` if description is
+  // missing). Optional args (`required: false`) are left out so
+  // server-side defaults can render — preserves prompts whose
+  // authors DO supply defaults.
+  //
+  // FastMCP auto-appends a JSON-schema note to non-bare-`str` arg
+  // descriptions:
+  //   "<original>\n\nProvide as a JSON string matching the following
+  //    schema: {...}"
+  // We strip this suffix before using the description as a hint so
+  // NRDS users see clean brackets like `[cfe_nom / lstm / routing_only]`
+  // instead of polluted ones. Non-FastMCP servers don't include this
+  // marker, so the strip is a graceful no-op for them.
   const handlePromptSelected = useCallback(async (prompt) => {
     const serverIdx = promptServerMap.get(prompt.name);
     if (serverIdx === undefined) return; // defensive — shouldn't happen
+    const synthArgs = {};
+    for (const arg of prompt.arguments ?? []) {
+      if (!arg?.required) continue;
+      const rawDesc = typeof arg.description === "string" ? arg.description : "";
+      const cleanedDesc = rawDesc.split("\n\nProvide as a JSON string")[0].trim();
+      const hint = cleanedDesc || arg.name;
+      synthArgs[arg.name] = `[${hint}]`;
+    }
     try {
-      const text = await getPrompt(serverIdx, prompt.name, {}, allMcpServers);
+      const text = await getPrompt(
+        serverIdx,
+        prompt.name,
+        synthArgs,
+        allMcpServers,
+      );
       setInput(text);
       setError("");
       lastTemplateInsertedAt.current = Date.now();

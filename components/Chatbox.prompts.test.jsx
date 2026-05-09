@@ -110,6 +110,82 @@ const PROMPT_BAR = {
   description: "Summarize a basin",
 };
 
+// Mirrors the post-refactor NRDS shape: every arg is `required: true`
+// with a hint-bearing `description`. Used to assert the chatbox-core
+// client-side synth produces `[<description>]` brackets.
+const PROMPT_PLOT_NRDS = {
+  name: "plot_timeseries",
+  description: "Plot a NRDS timeseries",
+  arguments: [
+    {
+      name: "model",
+      description: "cfe_nom / lstm / routing_only",
+      required: true,
+    },
+    {
+      name: "date",
+      description: "yyyy-mm-dd",
+      required: true,
+    },
+  ],
+};
+
+// FastMCP auto-appends a JSON-schema note to non-bare-`str` arg
+// descriptions. The chatbox-core synth strips this suffix so the
+// resulting bracket hint is clean.
+const FASTMCP_SUFFIX =
+  "\n\nProvide as a JSON string matching the following schema: " +
+  '{"description":"yyyy-mm-dd","type":"string"}';
+const PROMPT_PLOT_NRDS_FASTMCP = {
+  name: "plot_timeseries",
+  description: "Plot a NRDS timeseries",
+  arguments: [
+    {
+      name: "date",
+      description: "yyyy-mm-dd" + FASTMCP_SUFFIX,
+      required: true,
+    },
+  ],
+};
+
+// Subway-style: required args with no defaults; rich-text descriptions.
+const PROMPT_PLAN_TRIP = {
+  name: "plan-trip",
+  description: "Plan a NYC subway trip",
+  arguments: [
+    {
+      name: "from",
+      description: 'Starting station name (e.g. "Times Square")',
+      required: true,
+    },
+    {
+      name: "to",
+      description: 'Destination station name (e.g. "Fulton St")',
+      required: true,
+    },
+  ],
+};
+
+// Mixed required + optional: optional args should NOT be synthesized
+// (so server-side defaults can render).
+const PROMPT_MIXED = {
+  name: "mixed",
+  description: "Required + optional",
+  arguments: [
+    { name: "needed", description: "must supply", required: true },
+    { name: "skip_me", description: "server default", required: false },
+  ],
+};
+
+// Required arg with no description — synth falls back to bare name.
+const PROMPT_NO_DESC = {
+  name: "no-desc",
+  description: "",
+  arguments: [
+    { name: "anon", required: true },
+  ],
+};
+
 describe("Chatbox prompts discovery — R3 mount + change", () => {
   it("calls discoverPrompts once on mount and populates prompts state", async () => {
     discoverPrompts.mockResolvedValueOnce({
@@ -298,12 +374,15 @@ describe("Chatbox prompts selection — R7 happy path + R11 error placement", ()
     return { ...result, textarea };
   }
 
-  it("calls getPrompt and writes returned text into the input on success", async () => {
+  it("calls getPrompt with empty args for prompts that have no required args", async () => {
     getPrompt.mockResolvedValueOnce(
       "Retrieve a line chart for variable [variable]",
     );
     const { textarea } = await renderAndSelectFirstPrompt();
 
+    // PROMPT_FOO has no `arguments` field, so synth args is `{}`. Servers
+    // whose prompts use server-side defaults (or have no args at all)
+    // still get the empty-args call.
     expect(getPrompt).toHaveBeenCalledWith(
       0,
       "plot_timeseries",
@@ -311,6 +390,215 @@ describe("Chatbox prompts selection — R7 happy path + R11 error placement", ()
       expect.any(Array),
     );
     expect(textarea.value).toMatch(/Retrieve a line chart for variable \[variable\]/);
+  });
+
+  it("synthesizes [description] brackets for each required arg (NRDS shape)", async () => {
+    discoverPrompts.mockResolvedValueOnce({
+      promptsByServer: { 0: [PROMPT_PLOT_NRDS] },
+      promptServerMap: new Map([["plot_timeseries", 0]]),
+      perServer: [{ serverId: "0", promptCount: 1, errorKey: null }],
+    });
+    getPrompt.mockResolvedValueOnce(
+      "On the [cfe_nom / lstm / routing_only] model for date [yyyy-mm-dd]",
+    );
+
+    const { container } = await renderChatbox({ mcpServers: [SERVER_A] });
+    const textarea = container.querySelector("textarea");
+
+    await act(async () => {
+      textarea.focus();
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        "value",
+      ).set;
+      setter.call(textarea, "/");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      textarea.dispatchEvent(
+        new window.KeyboardEvent("keydown", {
+          key: "Enter", bubbles: true, cancelable: true,
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Synth produced `[<description>]` brackets per required arg.
+    expect(getPrompt).toHaveBeenCalledWith(
+      0,
+      "plot_timeseries",
+      {
+        model: "[cfe_nom / lstm / routing_only]",
+        date: "[yyyy-mm-dd]",
+      },
+      expect.any(Array),
+    );
+    // The rendered text (mocked) is the result; assert input was filled.
+    expect(textarea.value).toMatch(/cfe_nom \/ lstm \/ routing_only/);
+    expect(textarea.value).toMatch(/yyyy-mm-dd/);
+  });
+
+  it("strips FastMCP's auto-appended JSON-schema note from description before bracketing", async () => {
+    discoverPrompts.mockResolvedValueOnce({
+      promptsByServer: { 0: [PROMPT_PLOT_NRDS_FASTMCP] },
+      promptServerMap: new Map([["plot_timeseries", 0]]),
+      perServer: [{ serverId: "0", promptCount: 1, errorKey: null }],
+    });
+    getPrompt.mockResolvedValueOnce("rendered ok");
+
+    const { container } = await renderChatbox({ mcpServers: [SERVER_A] });
+    const textarea = container.querySelector("textarea");
+
+    await act(async () => {
+      textarea.focus();
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        "value",
+      ).set;
+      setter.call(textarea, "/");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      textarea.dispatchEvent(
+        new window.KeyboardEvent("keydown", {
+          key: "Enter", bubbles: true, cancelable: true,
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Synth bracket is `[yyyy-mm-dd]`, NOT the polluted full description.
+    expect(getPrompt).toHaveBeenCalledWith(
+      0,
+      "plot_timeseries",
+      { date: "[yyyy-mm-dd]" },
+      expect.any(Array),
+    );
+  });
+
+  it("handles subway-style prompts (required args with rich descriptions)", async () => {
+    discoverPrompts.mockResolvedValueOnce({
+      promptsByServer: { 0: [PROMPT_PLAN_TRIP] },
+      promptServerMap: new Map([["plan-trip", 0]]),
+      perServer: [{ serverId: "0", promptCount: 1, errorKey: null }],
+    });
+    getPrompt.mockResolvedValueOnce(
+      'I need to get from [Starting station name (e.g. "Times Square")] to [Destination station name (e.g. "Fulton St")] on the NYC subway.',
+    );
+
+    const { container } = await renderChatbox({ mcpServers: [SERVER_A] });
+    const textarea = container.querySelector("textarea");
+
+    await act(async () => {
+      textarea.focus();
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        "value",
+      ).set;
+      setter.call(textarea, "/");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      textarea.dispatchEvent(
+        new window.KeyboardEvent("keydown", {
+          key: "Enter", bubbles: true, cancelable: true,
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getPrompt).toHaveBeenCalledWith(
+      0,
+      "plan-trip",
+      {
+        from: '[Starting station name (e.g. "Times Square")]',
+        to: '[Destination station name (e.g. "Fulton St")]',
+      },
+      expect.any(Array),
+    );
+    expect(textarea.value).toMatch(/Times Square/);
+    expect(textarea.value).toMatch(/Fulton St/);
+  });
+
+  it("does NOT synthesize args for required: false (preserves server-side defaults)", async () => {
+    discoverPrompts.mockResolvedValueOnce({
+      promptsByServer: { 0: [PROMPT_MIXED] },
+      promptServerMap: new Map([["mixed", 0]]),
+      perServer: [{ serverId: "0", promptCount: 1, errorKey: null }],
+    });
+    getPrompt.mockResolvedValueOnce("ok");
+
+    const { container } = await renderChatbox({ mcpServers: [SERVER_A] });
+    const textarea = container.querySelector("textarea");
+
+    await act(async () => {
+      textarea.focus();
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        "value",
+      ).set;
+      setter.call(textarea, "/");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      textarea.dispatchEvent(
+        new window.KeyboardEvent("keydown", {
+          key: "Enter", bubbles: true, cancelable: true,
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Only `needed` (required: true) is synthesized; `skip_me` is omitted
+    // so the server's own default applies.
+    expect(getPrompt).toHaveBeenCalledWith(
+      0,
+      "mixed",
+      { needed: "[must supply]" },
+      expect.any(Array),
+    );
+  });
+
+  it("falls back to bare arg name when required arg has no description", async () => {
+    discoverPrompts.mockResolvedValueOnce({
+      promptsByServer: { 0: [PROMPT_NO_DESC] },
+      promptServerMap: new Map([["no-desc", 0]]),
+      perServer: [{ serverId: "0", promptCount: 1, errorKey: null }],
+    });
+    getPrompt.mockResolvedValueOnce("ok");
+
+    const { container } = await renderChatbox({ mcpServers: [SERVER_A] });
+    const textarea = container.querySelector("textarea");
+
+    await act(async () => {
+      textarea.focus();
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        "value",
+      ).set;
+      setter.call(textarea, "/");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      textarea.dispatchEvent(
+        new window.KeyboardEvent("keydown", {
+          key: "Enter", bubbles: true, cancelable: true,
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getPrompt).toHaveBeenCalledWith(
+      0,
+      "no-desc",
+      { anon: "[anon]" },
+      expect.any(Array),
+    );
   });
 
   it("clears any prior error state on successful insertion", async () => {
