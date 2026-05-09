@@ -26,17 +26,26 @@ export function makeFakeTransport(overrides = {}) {
 /**
  * Build a fake `Client` instance with `connect()` and `listTools()` as
  * `vi.fn()`s. Defaults: connect resolves; listTools returns no tools.
+ *
+ * Optional `listPromptsImpl` / `getPromptImpl` (Plan 2026-05-08-005 Unit 2):
+ * default to UNDEFINED (matching the existing pattern for other optional
+ * methods) so tests covering the engine's prompt-discovery path can
+ * mock them per-suite without affecting other tests.
  */
 export function makeFakeClient({
   tools = [],
   connectImpl,
   listToolsImpl,
   callToolImpl,
+  listPromptsImpl,
+  getPromptImpl,
 } = {}) {
   return {
     connect: connectImpl ?? vi.fn().mockResolvedValue(undefined),
     listTools: listToolsImpl ?? vi.fn().mockResolvedValue({ tools }),
     callTool: callToolImpl ?? vi.fn().mockResolvedValue({ data: null }),
+    listPrompts: listPromptsImpl,
+    getPrompt: getPromptImpl,
   };
 }
 

@@ -18,7 +18,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import styled, { ThemeProvider } from "styled-components";
 import chatTheme from "../theme/index.js";
-import { runChatSession } from "../engine/index.js";
+import { runChatSession, discoverPrompts, getPrompt } from "../engine/index.js";
 import { createProbeScheduler } from "../engine/probe.js";
 import { validateServerUrl } from "../engine/transports.js";
 import { listModels } from "../helpers/index.js";
@@ -287,6 +287,18 @@ export default function Chatbox({
   const hasProbedThisSessionRef = useRef(new Set());
   const schedulerRef = useRef(null);
 
+  // Plan 2026-05-08-005 Unit 4 — slash-command prompt-template state.
+  // Mount-time `discoverPrompts` populates the flat `prompts` list and
+  // the name-to-server-index map used by `handlePromptSelected`. The
+  // generation counter drops out-of-order resolves and post-unmount
+  // resolves so rapid `mcpServers` changes settle on the latest result.
+  // `lastTemplateInsertedAt` guards the singular-`prompt` seed effect
+  // from clobbering a freshly-inserted template (see useEffect below).
+  const [prompts, setPrompts] = useState([]);
+  const [promptServerMap, setPromptServerMap] = useState(new Map());
+  const discoverGen = useRef(0);
+  const lastTemplateInsertedAt = useRef(0);
+
   const configuredModels = useMemo(
     () => {
       const opts = Array.isArray(modelOptions) && modelOptions.length ? modelOptions : [model];
@@ -447,6 +459,102 @@ export default function Chatbox({
   // transport closes don't outlive the component.
   useEffect(() => () => schedulerRef.current?.cancelAll(), []);
 
+  // Plan 2026-05-08-005 Unit 4 — mount-time + mcpServers-change prompt
+  // discovery. Generation-counter race protection: each effect run bumps
+  // `discoverGen.current`; on resolve we compare gen vs latest, dropping
+  // stale (out-of-order) and post-unmount resolves. Cleanup also bumps
+  // the counter so an in-flight discover at unmount is ignored.
+  useEffect(() => {
+    const gen = ++discoverGen.current;
+    discoverPrompts(allMcpServers)
+      .then((result) => {
+        if (gen !== discoverGen.current) return; // stale resolve
+        // Flatten promptsByServer values into a single array; sort by
+        // serverId so the order is deterministic across renders.
+        const flat = Object.entries(result.promptsByServer)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .flatMap(([, list]) => list);
+        setPrompts(flat);
+        setPromptServerMap(result.promptServerMap);
+      })
+      .catch(() => {
+        // discoverPrompts already swallows per-server errors — but if
+        // the helper itself throws (e.g., flatten error), keep state
+        // empty per R10's silent-fallback contract.
+        if (gen !== discoverGen.current) return;
+        setPrompts([]);
+        setPromptServerMap(new Map());
+      });
+    return () => { ++discoverGen.current; };
+  }, [allMcpServers]);
+
+  // Plan 2026-05-08-005 Unit 4 — selection handler. Looks up the source
+  // server via promptServerMap, calls getPrompt with synthesized
+  // bracket placeholders for every `required: true` argument, writes
+  // the rendered text into the input, and clears any prior error on
+  // success. Failures surface a one-line user-facing message via
+  // setError; the underlying error is also console.error'd so
+  // devtools-savvy users and support staff can self-diagnose without
+  // changing user copy (per the brainstorm's MCP-error-envelope
+  // learnings).
+  //
+  // **Why synthesize brackets client-side**: third-party MCP servers
+  // (mta-subway-mcp-server, etc.) declare prompt args as
+  // `required: true` with no defaults and validate strictly with Zod.
+  // Calling `prompts/get(name, {})` on those servers raises -32602.
+  // The synth generalizes the K4 placeholder convention from plan-005
+  // (originally NRDS-only) to ANY MCP server: each required arg gets
+  // `[<arg.description>]` (or `[<arg.name>]` if description is
+  // missing). Optional args (`required: false`) are left out so
+  // server-side defaults can render — preserves prompts whose
+  // authors DO supply defaults.
+  //
+  // FastMCP auto-appends a JSON-schema note to non-bare-`str` arg
+  // descriptions:
+  //   "<original>\n\nProvide as a JSON string matching the following
+  //    schema: {...}"
+  // We strip this suffix before using the description as a hint so
+  // NRDS users see clean brackets like `[cfe_nom / lstm / routing_only]`
+  // instead of polluted ones. Non-FastMCP servers don't include this
+  // marker, so the strip is a graceful no-op for them.
+  const handlePromptSelected = useCallback(async (prompt) => {
+    const serverIdx = promptServerMap.get(prompt.name);
+    if (serverIdx === undefined) return; // defensive — shouldn't happen
+    // Spec says `arguments` is `Array<{name, description?, required?}> | undefined`.
+    // Guard against malformed servers that ship a non-array value so the
+    // for-of below never throws on an unexpected shape.
+    const args = Array.isArray(prompt?.arguments) ? prompt.arguments : [];
+    const synthArgs = {};
+    for (const arg of args) {
+      if (!arg?.required) continue;
+      // Reject malformed args missing a usable `name` — the wire dict's
+      // key would otherwise become "undefined" or "" and the server
+      // would reject the call.
+      if (typeof arg.name !== "string" || arg.name.length === 0) continue;
+      const rawDesc = typeof arg.description === "string" ? arg.description : "";
+      const cleanedDesc = rawDesc.split("\n\nProvide as a JSON string")[0].trim();
+      const hint = cleanedDesc || arg.name;
+      synthArgs[arg.name] = `[${hint}]`;
+    }
+    try {
+      const text = await getPrompt(
+        serverIdx,
+        prompt.name,
+        synthArgs,
+        allMcpServers,
+      );
+      setInput(text);
+      setError("");
+      lastTemplateInsertedAt.current = Date.now();
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[chatbox-core] prompts/get failed:", err);
+      setError(
+        "Couldn't load template — please try again or type your prompt manually",
+      );
+    }
+  }, [allMcpServers, promptServerMap]);
+
   const handleProviderSave = useCallback((newConfig) => {
     setProviderConfig(newConfig);
     setShowProviderPanel(false);
@@ -486,7 +594,17 @@ export default function Chatbox({
   }, [messages, onMessagesChange]);
 
   // Sync props
-  useEffect(() => { setInput(prompt ?? ""); }, [prompt]);
+  // Plan 2026-05-08-005 Unit 4 — guard against the seed effect clobbering
+  // a freshly-inserted slash-template. If a template was inserted within
+  // the last 500ms, skip the singular-`prompt` re-seed; this is the
+  // cheapest way to make the legacy seed effect coexist with the new
+  // plural-`prompts` selection path without forcing hosts to clear the
+  // singular prop. 500ms covers the worst-case React commit + parent
+  // re-render window for typical hosts.
+  useEffect(() => {
+    if (Date.now() - lastTemplateInsertedAt.current < 500) return;
+    setInput(prompt ?? "");
+  }, [prompt]);
   useEffect(() => { setSelectedModel(model); }, [model]);
   useEffect(() => { setIsThinkingEnabled(Boolean(thinkingEnabled)); }, [thinkingEnabled]);
   useEffect(() => { if (!isThinkingEnabled) setThinkingBuffer(""); }, [isThinkingEnabled]);
@@ -871,6 +989,8 @@ export default function Chatbox({
       showProviderPanel={showProviderPanel}
       onToggleProviderPanel={() => setShowProviderPanel((p) => !p)}
       providerConfig={providerConfig}
+      prompts={prompts}
+      onPromptSelected={handlePromptSelected}
     />
   );
 
@@ -923,7 +1043,16 @@ export default function Chatbox({
               </SuggestedPromptList>
             )}
           </Welcome>
-          <WelcomeInputWrapper>{inputBar}</WelcomeInputWrapper>
+          {/*
+            * Plan 2026-05-08-005 R11 — render ChatErrorPanel above the
+            * input in BOTH the welcome (no-messages) and has-messages
+            * branches. Returns null on empty error so this costs nothing
+            * visually when there's no error to surface.
+            */}
+          <WelcomeInputWrapper>
+            <ChatErrorPanel error={error} />
+            {inputBar}
+          </WelcomeInputWrapper>
       </ChatShell>
     );
   }

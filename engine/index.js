@@ -349,6 +349,207 @@ async function closeAllMcpConnections(connections) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Plan 2026-05-08-005 Unit 2 — MCP prompt-template discovery + rendering.
+//
+// `discoverPrompts` and `getPrompt` are MODULE-PRIVATE helpers. They are
+// exported here only so that `engine/__test_internals__.js` can re-export
+// them for the test suite. They are intentionally NOT added to the
+// curated barrel exports in `lib/chatbox-core/index.js`, and consumers
+// are not expected to import them. A future `onPromptsLoaded` host hook
+// (deferred) would pre-commit them to the public surface.
+//
+// Lifecycle differs from `connectMcpServers`: prompts are fetched at
+// `<Chatbox>` mount time (and on `mcpServers` prop reference change) so
+// the slash-command popover can be available before any send.
+// `discoverPrompts` opens its own transient transport per server, just
+// like `connectMcpServers`, and closes it in `finally`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Error class thrown by `getPrompt` when the resolved prompt text is empty
+ * (no messages, all messages dropped by the text-only filter, or all
+ * `.text` values empty). Distinguishable from network/transport errors so
+ * the host can route a tailored user-facing message.
+ */
+export class EmptyPromptError extends Error {
+  constructor(message = "Prompt resolved to empty text") {
+    super(message);
+    this.name = "EmptyPromptError";
+  }
+}
+
+/**
+ * JSON-RPC -32601 (method-not-found) detector. Some transports surface it
+ * as a structured `{code: -32601}` error, others as a stringified message
+ * containing "Method not found" or "-32601". Treat both as the same R10a
+ * silent-fallback class.
+ */
+function _isMethodNotFound(err) {
+  if (!err) return false;
+  if (err.code === -32601) return true;
+  const data = err.data;
+  if (data && (data.code === -32601 || data?.error?.code === -32601)) return true;
+  const msg = String(err?.message ?? err);
+  return /-32601|method not found/i.test(msg);
+}
+
+/**
+ * Discover prompts from each configured MCP server.
+ *
+ * Module-private. Called from `<Chatbox>` mount-effect (see Plan
+ * 2026-05-08-005 Unit 4). Per-server `listPrompts()` failures (method-
+ * not-found, network errors, timeouts) degrade silently to an empty
+ * list for that server — the popover simply has nothing to show from
+ * that source. Other servers' results are unaffected.
+ *
+ * Nil/empty input contract: returns the empty envelope SYNCHRONOUSLY
+ * without opening any transport when `mcpServers` is `null`, `undefined`,
+ * or `[]`. Matches the parent `useEffect`'s mount-time call shape before
+ * any server is configured.
+ *
+ * @param {Array<{id?: string, url: string, name?: string}>} mcpServers
+ * @returns {Promise<{
+ *   promptsByServer: Object<string, Array>,
+ *   promptServerMap: Map<string, number>,
+ *   perServer: Array<{serverId: string, promptCount: number, errorKey: ?string}>
+ * }>}
+ */
+export async function discoverPrompts(mcpServers) {
+  // Nil/empty contract — return synchronously, no transport opened.
+  if (!Array.isArray(mcpServers) || mcpServers.length === 0) {
+    return {
+      promptsByServer: {},
+      promptServerMap: new Map(),
+      perServer: [],
+    };
+  }
+
+  const promptsByServer = {};
+  const promptServerMap = new Map();
+  const perServer = [];
+
+  for (let i = 0; i < mcpServers.length; i++) {
+    const server = mcpServers[i];
+    const serverId = String(i);
+    promptsByServer[serverId] = [];
+
+    let conn = null;
+    let phase = "transport";
+    let errorKey = null;
+
+    try {
+      conn = await pickTransport(server.url);
+      phase = "list_prompts";
+      const response = await withTimeout(
+        conn.client.listPrompts(),
+        LIST_TOOLS_BUDGET_MS,
+      );
+      const promptList = Array.isArray(response?.prompts) ? response.prompts : [];
+
+      for (const prompt of promptList) {
+        promptsByServer[serverId].push(prompt);
+
+        if (promptServerMap.has(prompt.name)) {
+          // Mirrors the toolServerMap collision-warn precedent at
+          // engine/index.js:252-256. First server wins.
+          console.warn(
+            `Prompt name collision: "${prompt.name}" exists on server ${promptServerMap.get(prompt.name)} and server ${i}. ` +
+            `Keeping first server's mapping. Consider using unique prompt names across servers.`
+          );
+        } else {
+          promptServerMap.set(prompt.name, i);
+        }
+      }
+    } catch (error) {
+      // R10a method-not-found OR R10c generic network/RPC error — both
+      // collapse to an empty prompt list for this server. The errorKey
+      // lets observability tooling distinguish them; the user-facing
+      // surface (popover) doesn't render anything either way per R10.
+      if (_isMethodNotFound(error)) {
+        errorKey = ERROR_KEYS.notMcpServer;
+      } else if (error?.isTimeout) {
+        errorKey = ERROR_KEYS.timeout;
+      } else if (phase === "list_prompts") {
+        errorKey = ERROR_KEYS.notMcpServer;
+      } else {
+        errorKey = error?.errorKey ?? ERROR_KEYS.connectionFailed;
+      }
+    } finally {
+      if (conn) {
+        await closeMcpConnection(conn);
+      }
+    }
+
+    perServer.push({
+      serverId,
+      promptCount: promptsByServer[serverId].length,
+      errorKey,
+    });
+  }
+
+  return { promptsByServer, promptServerMap, perServer };
+}
+
+/**
+ * Fetch and render a single prompt template from the specified server.
+ *
+ * Module-private. Opens a transient transport via `pickTransport`, calls
+ * `client.getPrompt({name, arguments})`, filters response messages to
+ * text-only content per R7a, and returns the concatenated `.text` values.
+ *
+ * Throws `EmptyPromptError` if the concatenated string is empty (no
+ * messages, all dropped, or all `.text` empty). Other errors (transport,
+ * timeout, server) propagate as-is so callers can branch on error class.
+ *
+ * @param {number} serverIdx
+ * @param {string} promptName
+ * @param {Object} args
+ * @param {Array} mcpServers
+ * @returns {Promise<string>}
+ */
+export async function getPrompt(serverIdx, promptName, args, mcpServers) {
+  const server = mcpServers?.[serverIdx];
+  if (!server) {
+    throw new Error(`No MCP server at index ${serverIdx}`);
+  }
+
+  let conn = null;
+  try {
+    conn = await pickTransport(server.url);
+    const result = await conn.client.getPrompt({
+      name: promptName,
+      arguments: args ?? {},
+    });
+
+    const messages = Array.isArray(result?.messages) ? result.messages : [];
+    const parts = [];
+    for (const msg of messages) {
+      const content = msg?.content;
+      if (!content) continue;
+      // Content can be a single content object or an array of them.
+      const contentArr = Array.isArray(content) ? content : [content];
+      for (const c of contentArr) {
+        if (c && c.type === "text" && typeof c.text === "string" && c.text.length > 0) {
+          parts.push(c.text);
+        }
+      }
+    }
+
+    const text = parts.join("");
+    if (text.length === 0) {
+      throw new EmptyPromptError(
+        `Prompt "${promptName}" resolved to empty text`,
+      );
+    }
+    return text;
+  } finally {
+    if (conn) {
+      await closeMcpConnection(conn);
+    }
+  }
+}
+
 export async function executeTool(toolName, args, connections, toolServerMap) {
   const serverIdx = toolServerMap.get(toolName);
   const conn = serverIdx != null ? connections[serverIdx] : null;
