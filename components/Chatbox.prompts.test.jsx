@@ -601,6 +601,116 @@ describe("Chatbox prompts selection — R7 happy path + R11 error placement", ()
     );
   });
 
+  it("survives malformed arguments (non-array): synth = {} and getPrompt is called with empty args", async () => {
+    // Defensive guard for spec-violating servers that ship something
+    // other than an array for `arguments`. The synth must not throw
+    // on the for-of and must degrade gracefully to empty-args call.
+    const PROMPT_BAD_ARGS = {
+      name: "bad-args",
+      description: "Spec-violating shape",
+      arguments: { not: "an array" }, // malformed
+    };
+    discoverPrompts.mockResolvedValueOnce({
+      promptsByServer: { 0: [PROMPT_BAD_ARGS] },
+      promptServerMap: new Map([["bad-args", 0]]),
+      perServer: [{ serverId: "0", promptCount: 1, errorKey: null }],
+    });
+    getPrompt.mockResolvedValueOnce("ok despite bad args");
+
+    const { container } = await renderChatbox({ mcpServers: [SERVER_A] });
+    const textarea = container.querySelector("textarea");
+
+    await act(async () => {
+      textarea.focus();
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        "value",
+      ).set;
+      setter.call(textarea, "/");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      textarea.dispatchEvent(
+        new window.KeyboardEvent("keydown", {
+          key: "Enter", bubbles: true, cancelable: true,
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getPrompt).toHaveBeenCalledWith(
+      0,
+      "bad-args",
+      {},
+      expect.any(Array),
+    );
+    expect(textarea.value).toMatch(/ok despite bad args/);
+  });
+
+  it("skips required args missing a usable name (no `undefined` key in synthArgs)", async () => {
+    // Defensive guard for spec-violating servers whose argument
+    // entries omit the `name` field (or set it to a non-string). A
+    // naive synth would write synthArgs[undefined] = "[undefined]"
+    // and the server would reject that key. Skip such entries
+    // entirely; well-formed entries in the same arguments list are
+    // still synthesized.
+    const PROMPT_PARTIAL = {
+      name: "partial",
+      description: "One arg has no name",
+      arguments: [
+        { name: "good", description: "good hint", required: true },
+        { description: "anonymous required arg", required: true }, // no name
+        { name: "", description: "empty name", required: true }, // empty name
+      ],
+    };
+    discoverPrompts.mockResolvedValueOnce({
+      promptsByServer: { 0: [PROMPT_PARTIAL] },
+      promptServerMap: new Map([["partial", 0]]),
+      perServer: [{ serverId: "0", promptCount: 1, errorKey: null }],
+    });
+    getPrompt.mockResolvedValueOnce("rendered");
+
+    const { container } = await renderChatbox({ mcpServers: [SERVER_A] });
+    const textarea = container.querySelector("textarea");
+
+    await act(async () => {
+      textarea.focus();
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype,
+        "value",
+      ).set;
+      setter.call(textarea, "/");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      textarea.dispatchEvent(
+        new window.KeyboardEvent("keydown", {
+          key: "Enter", bubbles: true, cancelable: true,
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Only the well-formed `good` arg is synthesized; the unnamed and
+    // empty-name entries are skipped. No `undefined` or empty-string
+    // key appears in synthArgs.
+    expect(getPrompt).toHaveBeenCalledWith(
+      0,
+      "partial",
+      { good: "[good hint]" },
+      expect.any(Array),
+    );
+    const callArgs = getPrompt.mock.calls[0][2];
+    // toEqual(["good"]) already proves no other keys are present, but
+    // make the intent explicit for the reader: no `undefined` or
+    // empty-string key snuck in from the malformed entries.
+    expect(Object.keys(callArgs)).toEqual(["good"]);
+    expect(Object.keys(callArgs)).not.toContain("undefined");
+    expect(Object.keys(callArgs)).not.toContain("");
+  });
+
   it("clears any prior error state on successful insertion", async () => {
     // Prime an error first by stubbing getPrompt to reject, then a
     // second selection succeeds and clears the panel.

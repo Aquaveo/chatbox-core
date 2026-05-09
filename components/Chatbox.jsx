@@ -520,9 +520,17 @@ export default function Chatbox({
   const handlePromptSelected = useCallback(async (prompt) => {
     const serverIdx = promptServerMap.get(prompt.name);
     if (serverIdx === undefined) return; // defensive — shouldn't happen
+    // Spec says `arguments` is `Array<{name, description?, required?}> | undefined`.
+    // Guard against malformed servers that ship a non-array value so the
+    // for-of below never throws on an unexpected shape.
+    const args = Array.isArray(prompt?.arguments) ? prompt.arguments : [];
     const synthArgs = {};
-    for (const arg of prompt.arguments ?? []) {
+    for (const arg of args) {
       if (!arg?.required) continue;
+      // Reject malformed args missing a usable `name` — the wire dict's
+      // key would otherwise become "undefined" or "" and the server
+      // would reject the call.
+      if (typeof arg.name !== "string" || arg.name.length === 0) continue;
       const rawDesc = typeof arg.description === "string" ? arg.description : "";
       const cleanedDesc = rawDesc.split("\n\nProvide as a JSON string")[0].trim();
       const hint = cleanedDesc || arg.name;
