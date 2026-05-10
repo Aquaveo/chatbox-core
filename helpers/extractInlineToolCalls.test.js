@@ -54,12 +54,20 @@ describe("extractInlineToolCallsWithResidual", () => {
   });
 
   it("extracts a single tool call and strips it from residual", () => {
+    // Inline extractor normalizes `arguments` to a JSON string for parity
+    // with the adapter-produced shape (anthropic.js:150 stringifies on
+    // receive, ollama.js stringifies on send). Without this, inline-
+    // extracted calls flowing back to Ollama as message history get
+    // rejected by Ollama's Go struct validator with
+    //   cannot unmarshal object into ... arguments of type string.
     const text = 'I will look this up. {"name": "search", "arguments": {"q": "apples"}} Let me know.';
     const result = extractInlineToolCallsWithResidual(text);
 
-    expect(result.calls).toEqual([
-      { function: { name: "search", arguments: { q: "apples" } } },
-    ]);
+    expect(result.calls).toHaveLength(1);
+    const call = result.calls[0];
+    expect(call.function.name).toBe("search");
+    expect(typeof call.function.arguments).toBe("string");
+    expect(JSON.parse(call.function.arguments)).toEqual({ q: "apples" });
     expect(result.residualContent).toBe("I will look this up.  Let me know.");
   });
 
@@ -96,6 +104,25 @@ describe("extractInlineToolCallsWithResidual", () => {
     expect(result.residualContent).toBe("Before.  After.");
   });
 
+  it("returns arguments as a JSON string regardless of source shape", () => {
+    // Pins the string-args contract for ALL inline-extracted calls.
+    // Object-shaped args from `{"name": "X", "arguments": {...}}` AND
+    // string-shaped args from `{"tool": "X", "query": "..."}` both come
+    // out as strings, so downstream consumers (the engine, the ollama
+    // wire-format) see a uniform shape.
+    const objectArgsText = '{"name": "search", "arguments": {"q": "apples"}}';
+    const stringArgsText =
+      '```json\n{"tool": "discovery", "query": "restaurants"}\n```';
+
+    const fromObject = extractInlineToolCallsWithResidual(objectArgsText);
+    const fromString = extractInlineToolCallsWithResidual(stringArgsText);
+
+    expect(typeof fromObject.calls[0].function.arguments).toBe("string");
+    expect(typeof fromString.calls[0].function.arguments).toBe("string");
+    // No double-encoding: the originally-string arg stays as the same string.
+    expect(fromString.calls[0].function.arguments).toBe("restaurants");
+  });
+
   it("does not match plain JSON examples that lack tool-call shape", () => {
     // A model writing "the response shape is {data: [...]}" must not be
     // mistaken for a tool call.
@@ -126,9 +153,9 @@ describe("extractInlineToolCallsWithResidual", () => {
     const text = '{"tool": "search", "arguments": {"q": "x"}}';
     const result = extractInlineToolCallsWithResidual(text);
 
-    expect(result.calls).toEqual([
-      { function: { name: "search", arguments: { q: "x" } } },
-    ]);
+    expect(result.calls).toHaveLength(1);
+    expect(result.calls[0].function.name).toBe("search");
+    expect(JSON.parse(result.calls[0].function.arguments)).toEqual({ q: "x" });
   });
 
   it("recognizes `tool_name` alias for name", () => {
@@ -143,7 +170,7 @@ describe("extractInlineToolCallsWithResidual", () => {
     const result = extractInlineToolCallsWithResidual(text);
 
     expect(result.calls[0].function.name).toBe("search");
-    expect(result.calls[0].function.arguments).toEqual({ q: "x" });
+    expect(JSON.parse(result.calls[0].function.arguments)).toEqual({ q: "x" });
   });
 
   it("recognizes `query` as args alias (Ollama gemma variant)", () => {
@@ -216,10 +243,14 @@ describe("extractInlineToolCallsWithResidual — extended args aliases", () => {
   });
 
   it("recognizes `request` and `payload` aliases", () => {
+    // String args pass through unchanged.
     expect(extractInlineToolCallsWithResidual('{"tool": "x", "request": "y"}').calls)
       .toEqual([{ function: { name: "x", arguments: "y" } }]);
-    expect(extractInlineToolCallsWithResidual('{"tool": "x", "payload": {"k": 1}}').calls)
-      .toEqual([{ function: { name: "x", arguments: { k: 1 } } }]);
+    // Object args are normalized to a JSON string (parity with adapter output).
+    const objArgsResult =
+      extractInlineToolCallsWithResidual('{"tool": "x", "payload": {"k": 1}}');
+    expect(objArgsResult.calls[0].function.name).toBe("x");
+    expect(JSON.parse(objArgsResult.calls[0].function.arguments)).toEqual({ k: 1 });
   });
 });
 
