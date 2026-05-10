@@ -159,3 +159,219 @@ describe("ollama streamChat — error rendering", () => {
     ).rejects.toThrow(/Ollama proxy returned 502:/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// tool_calls round-trip — ensures arguments are sent as a JSON STRING
+// regardless of whether the assistant message carries them as an object or
+// a string. Newer Ollama versions reject object arguments on /api/chat with
+//   400 json: cannot unmarshal object into Go struct field
+//   .messages.tool_calls.function.arguments of type string
+// because the API now follows OpenAI's stringified-JSON wire format.
+// Observed 2026-05-10 on qwen3:latest. Same normalization pattern already
+// exists in the Anthropic adapter (engine/adapters/anthropic.js:150).
+// ---------------------------------------------------------------------------
+
+function mockEmptyStreamResponse() {
+  // Single empty NDJSON line. Lets streamChat finish without producing any
+  // tool_calls of its own; the call returns immediately.
+  const encoder = new TextEncoder();
+  let returned = false;
+  return vi.fn(async () => ({
+    ok: true,
+    body: {
+      getReader() {
+        return {
+          async read() {
+            if (returned) return { done: true };
+            returned = true;
+            return { done: false, value: encoder.encode("\n") };
+          },
+        };
+      },
+    },
+  }));
+}
+
+describe("ollama streamChat — tool_calls argument normalization", () => {
+  it("stringifies object-shaped tool_calls.function.arguments before sending", async () => {
+    const fetchSpy = mockEmptyStreamResponse();
+    global.fetch = fetchSpy;
+
+    const messagesIn = [
+      { role: "user", content: "show data" },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            id: "call_1",
+            function: {
+              name: "query_output_file",
+              // Object — what Ollama native /api/chat historically returned
+              // and what `mergeToolCalls` therefore stores. Newer Ollama
+              // server rejects this on the inbound request.
+              arguments: { model: "cfe_nom", date: "2026-05-10" },
+            },
+          },
+        ],
+      },
+      { role: "tool", tool_name: "query_output_file", content: "{}" },
+      { role: "user", content: "can you plot the time series?" },
+    ];
+
+    await streamChat({
+      provider: "ollama",
+      baseUrl: "http://localhost:11434",
+      model: "qwen3:latest",
+      messages: messagesIn,
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [, fetchOpts] = fetchSpy.mock.calls[0];
+    const sentBody = JSON.parse(fetchOpts.body);
+    const sentAssistant = sentBody.messages.find((m) => m.role === "assistant");
+    const sentArgs = sentAssistant.tool_calls[0].function.arguments;
+
+    expect(typeof sentArgs).toBe("string");
+    // Round-trips back to the original object payload — no value lost.
+    expect(JSON.parse(sentArgs)).toEqual({
+      model: "cfe_nom",
+      date: "2026-05-10",
+    });
+  });
+
+  it("leaves already-string arguments unchanged (no double-encoding)", async () => {
+    const fetchSpy = mockEmptyStreamResponse();
+    global.fetch = fetchSpy;
+
+    const argsString = JSON.stringify({ model: "cfe_nom" });
+    await streamChat({
+      provider: "ollama",
+      baseUrl: "http://localhost:11434",
+      model: "qwen3:latest",
+      messages: [
+        {
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            {
+              id: "call_1",
+              function: { name: "query_output_file", arguments: argsString },
+            },
+          ],
+        },
+        { role: "user", content: "plot" },
+      ],
+    });
+
+    const sentBody = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    const sent = sentBody.messages[0].tool_calls[0].function.arguments;
+    // Identity round-trip — must not be JSON.stringify-d into a double-
+    // escaped string like '"{\\"model\\":\\"cfe_nom\\"}"'.
+    expect(sent).toBe(argsString);
+  });
+
+  it("does not mutate the caller's messages array (cloned before normalization)", async () => {
+    const fetchSpy = mockEmptyStreamResponse();
+    global.fetch = fetchSpy;
+
+    const originalArgs = { model: "cfe_nom" };
+    const messagesIn = [
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            id: "call_1",
+            function: { name: "x", arguments: originalArgs },
+          },
+        ],
+      },
+      { role: "user", content: "p" },
+    ];
+
+    await streamChat({
+      provider: "ollama",
+      baseUrl: "http://localhost:11434",
+      model: "qwen3:latest",
+      messages: messagesIn,
+    });
+
+    // Caller's array MUST still see the object — otherwise UI or repair
+    // paths that re-read messages after the fetch would observe mutation.
+    expect(messagesIn[0].tool_calls[0].function.arguments).toBe(originalArgs);
+  });
+
+  it("stringifies object arguments returned from /api/chat (receive side)", async () => {
+    // Ollama native /api/chat streams `tool_calls[i].function.arguments` as
+    // a JSON object. The internal contract (matching anthropic.js:150 and
+    // engine/index.js:746-748) is that `arguments` is always a STRING; the
+    // engine `JSON.parse`s it before dispatch. This test pins that the
+    // adapter normalizes the object-shaped response to a string before
+    // returning, so any code path that reads tool_calls before the
+    // send-side normalization sees the right shape.
+    const encoder = new TextEncoder();
+    const ndjsonLine = JSON.stringify({
+      message: {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            function: {
+              name: "query_output_file",
+              // Object — Ollama native shape.
+              arguments: { model: "cfe_nom", date: "2026-05-10" },
+            },
+          },
+        ],
+      },
+      done: true,
+    }) + "\n";
+
+    let returned = false;
+    global.fetch = vi.fn(async () => ({
+      ok: true,
+      body: {
+        getReader() {
+          return {
+            async read() {
+              if (returned) return { done: true };
+              returned = true;
+              return { done: false, value: encoder.encode(ndjsonLine) };
+            },
+          };
+        },
+      },
+    }));
+
+    const { message } = await streamChat({
+      provider: "ollama",
+      baseUrl: "http://localhost:11434",
+      model: "qwen3:latest",
+      messages: [{ role: "user", content: "show data" }],
+    });
+
+    const args = message.tool_calls[0].function.arguments;
+    expect(typeof args).toBe("string");
+    expect(JSON.parse(args)).toEqual({ model: "cfe_nom", date: "2026-05-10" });
+  });
+
+  it("handles messages without tool_calls without error (no-op path)", async () => {
+    const fetchSpy = mockEmptyStreamResponse();
+    global.fetch = fetchSpy;
+
+    await streamChat({
+      provider: "ollama",
+      baseUrl: "http://localhost:11434",
+      model: "qwen3:latest",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "hello" },
+      ],
+    });
+
+    const sentBody = JSON.parse(fetchSpy.mock.calls[0][1].body);
+    expect(sentBody.messages).toHaveLength(2);
+    expect(sentBody.messages[0]).toEqual({ role: "user", content: "hi" });
+  });
+});

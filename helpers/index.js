@@ -352,7 +352,16 @@ export function extractInlineToolCallsWithResidual(text) {
       const args = readToolCallArgs(obj);
 
       if (name && args !== null) {
-        calls.push({ function: { name, arguments: args } });
+        // Normalize `arguments` to a JSON string for parity with the
+        // adapter-produced shape (anthropic.js:150 and ollama.js
+        // receive-side both stringify). Keeps the engine's downstream
+        // contract uniform — `engine/index.js` JSON.parses string args
+        // and treats objects as raw fallback. Inline-extracted calls
+        // that flow back to Ollama via message history must be strings
+        // or Ollama 400s on `cannot unmarshal object into ... type string`.
+        const normalizedArgs =
+          typeof args === "string" ? args : JSON.stringify(args);
+        calls.push({ function: { name, arguments: normalizedArgs } });
         matches.push({ start: i, end });
       }
     }
