@@ -378,6 +378,32 @@ describe("ChatInputBar slash-command — R6 keyboard behavior", () => {
     });
     expect(getPopover()).toBeNull();
   });
+
+  it("scroll inside the popover (own overflow-y:auto + Chromium auto-scroll-to-aria-activedescendant) does NOT close the popover", () => {
+    // Regression for the inner-popover-scroll dismiss bug: the
+    // capture-phase scroll listener used to fire indiscriminately on
+    // any descendant scroll, including the popover's own overflow-y
+    // scrolling and Chromium's auto-scroll-to-aria-activedescendant on
+    // ArrowUp/ArrowDown row navigation. Both should leave the popover
+    // open. Outer-page scrolls (covered by the test above) still close.
+    const { container } = render(<HostedInputBar prompts={examplePrompts} />);
+    const ta = getTextarea(container);
+    typeInto(ta, "/");
+    const popover = getPopover();
+    expect(popover).not.toBeNull();
+    act(() => {
+      popover.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    expect(getPopover()).not.toBeNull();
+    // Also a row-internal scroll (matches Chromium's auto-scroll target
+    // on aria-activedescendant change).
+    const rows = getRows();
+    expect(rows.length).toBeGreaterThan(0);
+    act(() => {
+      rows[0].dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    expect(getPopover()).not.toBeNull();
+  });
 });
 
 describe("ChatInputBar slash-command — R7 selection generation-counter", () => {

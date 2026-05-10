@@ -400,6 +400,12 @@ export default function ChatInputBar({
 
   const popoverId = useId();
   const rowId = useCallback((idx) => `${popoverId}-row-${idx}`, [popoverId]);
+  // Ref on the popover wrapper so the document-level capture-phase scroll
+  // listener (R6 reflow handling, below) can distinguish scroll events
+  // INSIDE the popover (its own overflow-y:auto scroll, plus Chromium's
+  // auto-scroll-to-aria-activedescendant on arrow-key navigation) from
+  // outer-page scrolls that should dismiss it.
+  const popoverWrapRef = useRef(null);
 
   const promptsAvailable = prompts.length > 0;
 
@@ -483,25 +489,46 @@ export default function ChatInputBar({
   // closes the popover. v1 does not re-anchor. Sticky-dismiss the
   // current token so the detection effect doesn't immediately reopen
   // for the same input.
+  //
+  // Scroll listener is registered in the capture phase so it sees scroll
+  // events on any descendant — but that includes the popover's OWN
+  // overflow-y:auto scroll (when the user wheels/trackpad-scrolls inside
+  // it) and Chromium's auto-scroll-to-aria-activedescendant when the
+  // user navigates rows with ArrowUp/ArrowDown. Both of those should
+  // NOT dismiss the popover. Filter by event target: if the scroll
+  // originated inside the popover wrapper, ignore it. Outer-page scrolls
+  // (whose target is not inside the popover) still dismiss as intended.
   useEffect(() => {
     if (!popoverOpen) return undefined;
-    const close = () => {
+    const dismiss = () => {
       dismissedTokenRef.current = triggerToken;
       setPopoverOpen(false);
     };
-    window.addEventListener("resize", close);
-    document.addEventListener("scroll", close, true);
+    const onScroll = (e) => {
+      const wrap = popoverWrapRef.current;
+      const target = e.target;
+      if (
+        wrap &&
+        target instanceof Node &&
+        (target === wrap || wrap.contains(target))
+      ) {
+        return;
+      }
+      dismiss();
+    };
+    window.addEventListener("resize", dismiss);
+    document.addEventListener("scroll", onScroll, true);
     const vv = typeof window !== "undefined" ? window.visualViewport : null;
     if (vv) {
-      vv.addEventListener("resize", close);
-      vv.addEventListener("scroll", close);
+      vv.addEventListener("resize", dismiss);
+      vv.addEventListener("scroll", dismiss);
     }
     return () => {
-      window.removeEventListener("resize", close);
-      document.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", dismiss);
+      document.removeEventListener("scroll", onScroll, true);
       if (vv) {
-        vv.removeEventListener("resize", close);
-        vv.removeEventListener("scroll", close);
+        vv.removeEventListener("resize", dismiss);
+        vv.removeEventListener("scroll", dismiss);
       }
     };
   }, [popoverOpen, triggerToken]);
@@ -668,6 +695,7 @@ export default function ChatInputBar({
         typeof document !== "undefined" &&
         ReactDOM.createPortal(
           <PopoverWrap
+            ref={popoverWrapRef}
             id={popoverId}
             role="listbox"
             $left={anchor.left}
