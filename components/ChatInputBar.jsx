@@ -476,6 +476,32 @@ export default function ChatInputBar({
     }
   }, [popoverOpen, filteredPrompts.length, triggerToken, highlightedIndex]);
 
+  // Keep the highlighted row visible inside the popover's overflow-y:auto
+  // scroll container. ArrowUp/ArrowDown beyond the visible window must
+  // scroll the wrap, not silently move the selection off-screen.
+  // Computed against popoverWrapRef directly so only the popover scrolls
+  // (scrollIntoView can otherwise scroll outer page ancestors).
+  useEffect(() => {
+    if (!popoverOpen || filteredPrompts.length === 0) return;
+    const wrap = popoverWrapRef.current;
+    if (!wrap) return;
+    const targetId = rowId(highlightedIndex);
+    const row =
+      typeof wrap.querySelector === "function"
+        ? wrap.querySelector(`[id="${targetId}"]`)
+        : null;
+    if (!row) return;
+    const wrapRect = wrap.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    const relTop = rowRect.top - wrapRect.top + wrap.scrollTop;
+    const relBottom = relTop + rowRect.height;
+    if (relTop < wrap.scrollTop) {
+      wrap.scrollTop = relTop;
+    } else if (relBottom > wrap.scrollTop + wrap.clientHeight) {
+      wrap.scrollTop = relBottom - wrap.clientHeight;
+    }
+  }, [highlightedIndex, popoverOpen, filteredPrompts.length, rowId]);
+
   // R6 anchor coords — read textarea bounds when the popover opens.
   useLayoutEffect(() => {
     if (!popoverOpen) return;
