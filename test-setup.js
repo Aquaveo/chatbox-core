@@ -13,9 +13,9 @@
  * window.localStorage` holds, matching the contract pre-Node-25.
  *
  * Node-environment tests fall through the `if (typeof window ...)`
- * guard and only get the global storage; capabilityStorage.js's
- * `hasLocalStorage()` check still works there because the global is
- * present and has `setItem`.
+ * guard and only get the global storage; storage modules' feature-detect
+ * checks (`typeof localStorage !== 'undefined'`) still work there because
+ * the global is present and has `setItem`.
  */
 
 class MemoryStorage {

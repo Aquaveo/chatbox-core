@@ -22,10 +22,6 @@ import {
   stripThinkTags,
 } from "../helpers/index.js";
 import {
-  getOverride as getCapabilityOverride,
-  resetFailureCounter,
-} from "../storage/capabilityStorage.js";
-import {
   pickTransport,
   closeMcpConnection,
   withTimeout,
@@ -187,45 +183,6 @@ async function selectToolsForPrompt(prompt, toolsByServer, classificationByServe
 // ---------------------------------------------------------------------------
 // URL normalization, transport selection, and connection lifecycle live in
 // `./transports.js`. Credential-inheritance audit documented there too.
-
-/**
- * Resolve a model's tool-use capability from a populated model list and
- * provider context.
- *
- * Lookup order:
- *   1. modelList entry — if found, use its `capabilities` array.
- *   2. Per-provider fallback default:
- *        anthropic, openai → "supported" (these providers either return
- *          the capability via API or are name-pattern-matched in
- *          listModels; if a model isn't on the list at all, we still
- *          trust the provider since these are well-known tool-capable
- *          ecosystems and any genuine outlier gets caught by auto-learn).
- *        ollama → "unknown" — Ollama models without a populated
- *          capabilities entry are signal-less and default to safe-off.
- *        custom → "unknown" — no signal available; engine treats unknown
- *          for custom as tools-ON per Plan 002 R5 (tethysdash value loop
- *          is tool-driven; loud refusal is preferable to silent failure).
- *
- * Returns: `"supported"` | `"unsupported"` | `"unknown"`.
- *
- * Pure function — no I/O, exported for unit testing.
- */
-export function resolveModelCapability(modelName, modelList, providerName) {
-  // Override store wins (auto-learned + future user overrides). Lookup is
-  // a localStorage read with TTL + schema-version check; expired or
-  // invalid entries are ignored automatically.
-  const override = getCapabilityOverride(providerName, modelName);
-  if (override) return override.toolUse;
-
-  if (Array.isArray(modelList)) {
-    const entry = modelList.find((m) => m?.name === modelName);
-    if (entry && Array.isArray(entry.capabilities)) {
-      return entry.capabilities.includes("tools") ? "supported" : "unsupported";
-    }
-  }
-  if (providerName === "anthropic" || providerName === "openai") return "supported";
-  return "unknown";
-}
 
 /**
  * Apply a `beforeFirstMessage` extension return value to the message array.
@@ -1248,17 +1205,6 @@ export async function runChatSession({
         toolCalls, messages, connections, toolServerMap, state, text,
         { toolCategories, beforeToolExecution, toolErrorCheck, afterToolExecution, onToolStatus },
       );
-
-      // Plan 002 — auto-learn signal: a turn that successfully called
-      // tools (even tools that returned domain {error} envelopes — those
-      // count as success because the model used the tool correctly)
-      // resets the in-session consecutive-failure counter for this
-      // (provider, model). Hard adapter/transport errors leave the
-      // counter intact; the next reactive-detection observation will
-      // increment it normally.
-      if (!hadError) {
-        resetFailureCounter(providerConfig?.provider, model);
-      }
 
       // Extension point: early return for terminal results
       if (!hadError && earlyReturnCheck) {

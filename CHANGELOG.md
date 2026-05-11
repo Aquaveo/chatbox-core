@@ -8,6 +8,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed (BREAKING — pre-1.0 acceptable)
+
+- **`resolveModelCapability` from `engine/index.js`** and the entire
+  `storage/capabilityStorage.js` module (~450 lines including tests).
+  This was the reactive auto-learn write-side of the per-model
+  capability-gating subsystem, retired when the proactive
+  capability-detection path (`/api/show.capabilities` for Ollama,
+  name-pattern for OpenAI, constant for Anthropic — all in
+  `helpers/index.js → listModels`) became authoritative.
+  The reactive trigger (`recordFailure`) was never called in
+  production after the proactive pivot, so the storage never received
+  writes, `getOverride` always returned null, and `resolveModelCapability`
+  itself was only consumed by its own test file (which explicitly
+  documented "retained for display/diagnostics compatibility, but it
+  must not cause the engine to withhold MCP tools").
+  External consumers that imported any of `resolveModelCapability`,
+  `recordFailure`, `clearOverride`, `clearExpired`, `getOverride`,
+  `resetFailureCounter`, `CAPABILITY_SCHEMA_VERSION`, or `TTL_MS`
+  should switch to consuming `listModels`-returned model entries'
+  `capabilities` arrays directly. None of these symbols were
+  re-exported from the package root (`index.js`), so consumers using
+  only the public barrel are unaffected.
+
 ## [0.4.0] — 2026-05-06
 
 Two reversals of recently-shipped gates that turned out to block
