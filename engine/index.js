@@ -77,7 +77,19 @@ function classifyServerTools(serverTools) {
 // Tool Budget & Per-Server Selection
 // ---------------------------------------------------------------------------
 
-const TOOL_BUDGET = 25;
+// 2026-05-10 raise 25 → 50. The previous cap exactly matched single-server
+// catalog sizes that themselves grew over time (tethysdash post-Phase-3c
+// shipped 25 tools); zero margin meant any mixed-server configuration
+// (tethysdash + nrds-mcps, + external MCP servers) forced the embedding
+// ranker to drop slash-prompt-target tools per chat message, re-creating
+// the silent-misroute failure mode that prompted Phase 3b's pin-fix.
+//
+// 50 covers a realistic mixed setup (tethysdash 25 + nrds ~11 + one
+// external ~10 ≈ 46) with headroom. At ~150 tokens per tool definition,
+// 50 tools ≈ 7.5k tokens — workable inside the num_ctx=16384 default for
+// Ollama-backed flows, leaving ~8k for conversation. The embedding ranker
+// still earns its keep when total catalog > 50; the cap only moves.
+const TOOL_BUDGET = 50;
 
 /**
  * Select tools for the LLM based on per-server classification and a global budget.
