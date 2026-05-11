@@ -305,6 +305,68 @@ describe("ChatInputBar slash-command — R6 keyboard behavior", () => {
     expect(rows[0].getAttribute("aria-selected")).toBe("true");
   });
 
+  it("ArrowDown beyond the visible window scrolls the popover wrap so the highlighted row stays visible", () => {
+    // 6 rows, wrap viewport sized for ~2 rows. Highlight 4 -> wrap must scroll.
+    const manyPrompts = Array.from({ length: 6 }, (_, i) => ({
+      name: `prompt_${i}`,
+      description: `desc ${i}`,
+    }));
+    const { container } = render(<HostedInputBar prompts={manyPrompts} />);
+    const ta = getTextarea(container);
+    typeInto(ta, "/");
+
+    const wrap = getPopover();
+    const rows = getRows();
+    expect(rows).toHaveLength(6);
+
+    // Per-element layout stubs that override the prototype-level shim
+    // installed in beforeEach (which gives every element the same rect).
+    Object.defineProperty(wrap, "clientHeight", { configurable: true, get: () => 88 });
+    let currentScrollTop = 0;
+    Object.defineProperty(wrap, "scrollTop", {
+      configurable: true,
+      get: () => currentScrollTop,
+      set: (v) => {
+        currentScrollTop = v;
+      },
+    });
+    wrap.getBoundingClientRect = () => ({ top: 0, left: 0, height: 88, width: 200, right: 200, bottom: 88, x: 0, y: 0, toJSON: () => ({}) });
+    rows.forEach((row, idx) => {
+      row.getBoundingClientRect = () => ({
+        top: idx * 44 - currentScrollTop,
+        left: 0,
+        height: 44,
+        width: 200,
+        right: 200,
+        bottom: idx * 44 - currentScrollTop + 44,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      });
+    });
+
+    // Navigate to row 4 — its bottom (5*44 = 220) is past clientHeight (88),
+    // so the effect should set scrollTop to 220 - 88 = 132.
+    fireKey(ta, { key: "ArrowDown" });
+    fireKey(ta, { key: "ArrowDown" });
+    fireKey(ta, { key: "ArrowDown" });
+    fireKey(ta, { key: "ArrowDown" });
+
+    expect(getRows()[4].getAttribute("aria-selected")).toBe("true");
+    expect(currentScrollTop).toBeGreaterThan(0);
+    expect(currentScrollTop).toBe(132);
+
+    // ArrowUp back to row 0 — relTop (0) is now below scrollTop (132), so
+    // the effect should pull scrollTop back to 0.
+    fireKey(ta, { key: "ArrowUp" });
+    fireKey(ta, { key: "ArrowUp" });
+    fireKey(ta, { key: "ArrowUp" });
+    fireKey(ta, { key: "ArrowUp" });
+
+    expect(getRows()[0].getAttribute("aria-selected")).toBe("true");
+    expect(currentScrollTop).toBe(0);
+  });
+
   it("Enter on highlighted row calls onPromptSelected with the prompt object", () => {
     const onPromptSelected = vi.fn(() => Promise.resolve());
     const { container } = render(
