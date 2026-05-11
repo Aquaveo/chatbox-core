@@ -75,11 +75,22 @@ const ThinkingDropdown = styled.details`
   pre {
     margin: 0;
     padding: ${({ theme }) => `${theme.spacing.md} 0.7rem`};
+    /* Streaming reasoning tokens can land without spaces (URLs, code
+       fragments, long identifiers). Force-break anywhere to keep the
+       pre inside the bubble width — without this, the pre's intrinsic
+       min-content width exceeds the bubble in a narrow sidebar and
+       Bubble's overflow:hidden clips the right edge. */
     white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
     font-family: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
     font-size: ${({ theme }) => theme.fontSize.sm};
     line-height: 1.4;
     max-height: 300px;
+    overflow-x: hidden;
     overflow-y: auto;
     border-top: 1px solid ${({ theme }) => theme.colors.thinkingBorderInner};
   }
