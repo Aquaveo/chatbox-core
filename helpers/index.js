@@ -392,17 +392,17 @@ export function omitEmptyArgs(args) {
 }
 
 // ---------------------------------------------------------------------------
-// Ollama Cloud model-origin policy filter
+// Ollama Cloud model-listing policy filter
 // ---------------------------------------------------------------------------
 // Policy: when the Ollama provider is pointed at Ollama Cloud
-// (https://ollama.com), drop entries whose name starts with a known
-// Chinese-origin model family prefix. Local / self-hosted Ollama is
-// not filtered. This is a *policy* filter on a finite catalog — it is
-// deliberately a name-prefix denylist, distinct from the capability /
-// routing layer (which stays model-agnostic).
+// (https://ollama.com), drop entries whose name starts with any
+// configured prefix below. Local / self-hosted Ollama is not filtered.
+// This is a *policy* filter on a finite catalog — it is deliberately a
+// name-prefix denylist, distinct from the capability / routing layer
+// (which stays model-agnostic).
 //
 // To add a new family, append a lowercase prefix below.
-export const CHINESE_MODEL_PREFIXES = Object.freeze([
+export const BLOCKED_MODEL_PREFIXES = Object.freeze([
   "qwen",
   "deepseek",
   "glm",
@@ -415,13 +415,15 @@ export const CHINESE_MODEL_PREFIXES = Object.freeze([
   "xverse",
   "internlm",
   "skywork",
+  "kimi",
+  "minimax",
 ]);
 
-export function isBlockedChineseModel(name) {
+export function isBlockedModel(name) {
   if (typeof name !== "string" || !name) return false;
   // Tolerate registry prefixes like "ollama.com/library/qwen2.5:7b".
   const lastSegment = name.toLowerCase().split("/").pop();
-  return CHINESE_MODEL_PREFIXES.some((prefix) => lastSegment.startsWith(prefix));
+  return BLOCKED_MODEL_PREFIXES.some((prefix) => lastSegment.startsWith(prefix));
 }
 
 export function isOllamaCloudHost(baseUrl) {
@@ -536,7 +538,7 @@ export async function listModels(providerConfig = {}, options = {}) {
     }));
 
     if (isOllamaCloudHost(baseUrl)) {
-      return result.filter((m) => !isBlockedChineseModel(m.name));
+      return result.filter((m) => !isBlockedModel(m.name));
     }
     return result;
   }

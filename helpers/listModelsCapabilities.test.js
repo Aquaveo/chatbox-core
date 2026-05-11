@@ -278,10 +278,10 @@ describe("listModels — OpenAI capability population", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Ollama Cloud origin-policy filter — integration with listModels
+// Ollama Cloud model-listing policy filter — integration with listModels
 // ---------------------------------------------------------------------------
 
-describe("listModels — Ollama Cloud origin-policy filter", () => {
+describe("listModels — Ollama Cloud model-listing policy filter", () => {
   beforeEach(() => {
     if (typeof localStorage !== "undefined") localStorage.clear();
   });
@@ -319,7 +319,7 @@ describe("listModels — Ollama Cloud origin-policy filter", () => {
     });
   }
 
-  it("filters Chinese-origin models when baseUrl points at Ollama Cloud", async () => {
+  it("filters blocked models when baseUrl points at Ollama Cloud", async () => {
     global.fetch = mockMixedOllama();
     const result = await listModels({
       provider: "ollama",
