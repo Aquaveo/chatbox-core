@@ -26,7 +26,6 @@ import {
   detectAndStripToolShapedJson,
   extractInlineToolCalls,
   extractInlineToolCallsWithResidual,
-  looksLikeToolRefusal,
 } from "./index.js";
 
 describe("extractInlineToolCallsWithResidual", () => {
@@ -272,53 +271,6 @@ describe("detectAndStripToolShapedJson", () => {
 
     expect(result.hadToolShapedJson).toBe(true);
     expect(result.stripped).toBe("");
-  });
-});
-
-describe("looksLikeToolRefusal", () => {
-  it("matches the gemma3:12b refusal observed in the wild", () => {
-    expect(looksLikeToolRefusal(
-      "I am a tool-using AI assistant and cannot provide directions.",
-    )).toBe(true);
-  });
-
-  it("matches variants with hyphenated and unhyphenated phrasing", () => {
-    expect(looksLikeToolRefusal("I'm a tool using AI and can't help with that.")).toBe(true);
-    expect(looksLikeToolRefusal(
-      "As an AI assistant, I cannot perform tool calls.",
-    )).toBe(true);
-    expect(looksLikeToolRefusal("I cannot use any tools to answer this.")).toBe(true);
-  });
-
-  it("does not match a long legitimate answer that mentions tool-using AI in passing", () => {
-    const longText =
-      "Tool-using AI assistants are a category of large language models that can call functions. " +
-      "They include Claude, GPT-4, and several open-source models. The advantage is that they can " +
-      "interact with external systems. " +
-      "Examples of tasks they can perform include searching the web, querying databases, and " +
-      "running code. Users still cannot fully replace human judgment, however, since these models " +
-      "do not have access to real-time data without explicit tool wiring.";
-    expect(looksLikeToolRefusal(longText)).toBe(false);
-  });
-
-  it("does not match plain answers without tool framing", () => {
-    expect(looksLikeToolRefusal("To get to Central Park from Chinatown, take the M train north."))
-      .toBe(false);
-    expect(looksLikeToolRefusal("I cannot find that information.")).toBe(false);
-  });
-
-  it("does not match empty / non-string input", () => {
-    expect(looksLikeToolRefusal("")).toBe(false);
-    expect(looksLikeToolRefusal(null)).toBe(false);
-    expect(looksLikeToolRefusal(undefined)).toBe(false);
-  });
-
-  it("requires both tool framing AND a refusal phrase", () => {
-    // tool framing without refusal — not a refusal
-    expect(looksLikeToolRefusal("Tool-calling lets the AI invoke external functions."))
-      .toBe(false);
-    // refusal without tool framing — not a tool refusal
-    expect(looksLikeToolRefusal("I cannot help with that.")).toBe(false);
   });
 });
 

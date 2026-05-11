@@ -249,47 +249,6 @@ function stripMatchedSpans(text, matches) {
   return residual.trim();
 }
 
-// Detect refusal text from models that have been told they're "tool-using
-// AI assistants" but lack reliable tool-calling support (gemma3 variants,
-// some smaller Ollama models). When a tool-incapable model receives a
-// system prompt containing tool definitions, it sometimes locks up and
-// emits a refusal like "I am a tool-using AI assistant and cannot provide
-// directions." instead of answering from its own knowledge — even when the
-// question doesn't actually need tools.
-//
-// Legacy detector retained for downstream callers and tests. The engine no
-// longer uses this to retry without tools or disable tools; TethysDash
-// workflows keep MCP tools available. False positives are minimized by
-// requiring BOTH a tool-framing phrase AND a refusal phrase, and by capping
-// the matching window so a long legitimate answer that mentions tool-using AI
-// in passing doesn't match.
-export function looksLikeToolRefusal(text) {
-  if (typeof text !== "string" || !text.trim()) return false;
-  if (text.length > 400) return false;
-
-  const hasToolFraming =
-    /\btool[-\s]?using\b/i.test(text) ||
-    /\btool[-\s]?calling\b/i.test(text) ||
-    /\bfunction[-\s]?calling\b/i.test(text) ||
-    /\bperform tool calls?\b/i.test(text) ||
-    /\b(?:i\s+(?:am|'m)\s+)?(?:an?\s+)?ai\s+assistant\b[\s\S]{0,80}\btool/i.test(text);
-
-  // Direct refusal phrasings naming tools as the obstacle. These match
-  // independently of tool-using/tool-calling framing because "I cannot
-  // use any tools" is an unambiguous tool refusal on its own.
-  const directToolRefusal =
-    /\b(?:cannot|can'?t|unable to|don'?t|do not)\s+(?:use|call|invoke|access|reach)\s+(?:any\s+|the\s+|these\s+|those\s+|the\s+available\s+)?tools?\b/i.test(text);
-
-  const hasRefusal =
-    /\bcannot\b/i.test(text) ||
-    /\bcan'?t\b/i.test(text) ||
-    /\bunable to\b/i.test(text) ||
-    /\bdo(?:es)?\s+not\b/i.test(text) ||
-    /\bdon'?t\b/i.test(text);
-
-  return directToolRefusal || (hasToolFraming && hasRefusal);
-}
-
 // Detect JSON objects that look like tool-call attempts but couldn't be
 // parsed into structured calls (e.g., the model invented an unknown args
 // key). These should still be stripped from user-visible content because
