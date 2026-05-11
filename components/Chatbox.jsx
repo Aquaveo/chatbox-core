@@ -40,6 +40,7 @@ import LLMProviderPanel from "./LLMProviderPanel.jsx";
 const REQUIRED_MODEL_CAPABILITIES = ["tools"];
 
 const ADD_VISUALIZATION_EVENT = "tethysdash:add-visualization";
+const UPDATE_VISUALIZATION_EVENT = "tethysdash:update-visualization";
 
 // R16 — parse a patch_visualization error string into its allowed-prefixes
 // hint. The server formats errors as:
@@ -829,7 +830,7 @@ export default function Chatbox({
           dispatch: () => {
             for (const [uuid, layers] of unmatchedUpdates) {
               window.dispatchEvent(
-                new CustomEvent("tethysdash:update-visualization", {
+                new CustomEvent(UPDATE_VISUALIZATION_EVENT, {
                   detail: { uuid, operation: "append_layers", layers },
                 }),
               );
@@ -917,7 +918,7 @@ export default function Chatbox({
           capturedTurnId,
           dispatch: () => {
             window.dispatchEvent(
-              new CustomEvent("tethysdash:update-visualization", {
+              new CustomEvent(UPDATE_VISUALIZATION_EVENT, {
                 detail: {
                   batch: true,
                   operation: "apply_patch",

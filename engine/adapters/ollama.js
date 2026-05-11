@@ -7,7 +7,7 @@
 import { mergeToolCalls } from "../../helpers/index.js";
 
 export async function streamChat({
-  provider, baseUrl, apiKey, model,
+  baseUrl, apiKey, model,
   messages, tools, csrfToken, signal,
   onThinkingChunk, onContentChunk,
 }) {

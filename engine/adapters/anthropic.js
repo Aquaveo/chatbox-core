@@ -81,7 +81,7 @@ function translateTools(tools) {
 }
 
 export async function streamChat({
-  provider, baseUrl, apiKey, model,
+  baseUrl, apiKey, model,
   messages, tools, signal,
   thinkingBudget,
   onThinkingChunk, onContentChunk,
