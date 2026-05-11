@@ -392,6 +392,52 @@ export function omitEmptyArgs(args) {
 }
 
 // ---------------------------------------------------------------------------
+// Ollama Cloud model-origin policy filter
+// ---------------------------------------------------------------------------
+// Policy: when the Ollama provider is pointed at Ollama Cloud
+// (https://ollama.com), drop entries whose name starts with a known
+// Chinese-origin model family prefix. Local / self-hosted Ollama is
+// not filtered. This is a *policy* filter on a finite catalog — it is
+// deliberately a name-prefix denylist, distinct from the capability /
+// routing layer (which stays model-agnostic).
+//
+// To add a new family, append a lowercase prefix below.
+export const CHINESE_MODEL_PREFIXES = Object.freeze([
+  "qwen",
+  "deepseek",
+  "glm",
+  "chatglm",
+  "yi",
+  "baichuan",
+  "ernie",
+  "hunyuan",
+  "minicpm",
+  "xverse",
+  "internlm",
+  "skywork",
+]);
+
+export function isBlockedChineseModel(name) {
+  if (typeof name !== "string" || !name) return false;
+  // Tolerate registry prefixes like "ollama.com/library/qwen2.5:7b".
+  const lastSegment = name.toLowerCase().split("/").pop();
+  return CHINESE_MODEL_PREFIXES.some((prefix) => lastSegment.startsWith(prefix));
+}
+
+export function isOllamaCloudHost(baseUrl) {
+  if (typeof baseUrl !== "string" || !baseUrl) return false;
+  try {
+    const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(baseUrl)
+      ? baseUrl
+      : `https://${baseUrl}`;
+    const host = new URL(withScheme).hostname.toLowerCase();
+    return host === "ollama.com" || host === "www.ollama.com";
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Model loading (generic, proxy-based)
 // ---------------------------------------------------------------------------
 
@@ -482,12 +528,17 @@ export async function listModels(providerConfig = {}, options = {}) {
     const enriched = await mapWithConcurrency(models, 4, showOne);
     writeOllamaShowCache(showCache);
 
-    return models.map((m, i) => ({
+    const result = models.map((m, i) => ({
       name: m.name || m.model,
       contextLength: 8192,
       capabilities: enriched[i]?.capabilities ?? [],
       thinkingTypes: enriched[i]?.thinkingTypes ?? null,
     }));
+
+    if (isOllamaCloudHost(baseUrl)) {
+      return result.filter((m) => !isBlockedChineseModel(m.name));
+    }
+    return result;
   }
 
   const OpenAI = (await import("openai")).default;

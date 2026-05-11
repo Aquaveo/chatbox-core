@@ -276,3 +276,139 @@ describe("listModels — OpenAI capability population", () => {
     ).toEqual(["tools"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Ollama Cloud origin-policy filter — integration with listModels
+// ---------------------------------------------------------------------------
+
+describe("listModels — Ollama Cloud origin-policy filter", () => {
+  beforeEach(() => {
+    if (typeof localStorage !== "undefined") localStorage.clear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function mockMixedOllama() {
+    const tags = [
+      { name: "llama3.1:8b", modified_at: "2026-05-04T00:00:00Z" },
+      { name: "qwen2.5:7b", modified_at: "2026-05-04T00:00:00Z" },
+      { name: "mistral:7b", modified_at: "2026-05-04T00:00:00Z" },
+      { name: "deepseek-r1:32b", modified_at: "2026-05-04T00:00:00Z" },
+    ];
+    const showByModel = {
+      "llama3.1:8b": { capabilities: ["completion", "tools"] },
+      "qwen2.5:7b": { capabilities: ["completion", "tools"] },
+      "mistral:7b": { capabilities: ["completion", "tools"] },
+      "deepseek-r1:32b": { capabilities: ["completion", "tools"] },
+    };
+    return vi.fn(async (url, init) => {
+      if (url.includes("/api/tags")) {
+        return { ok: true, status: 200, json: async () => ({ models: tags }) };
+      }
+      if (url.includes("/api/show")) {
+        const body = JSON.parse(init?.body ?? "{}");
+        return {
+          ok: true,
+          status: 200,
+          json: async () => showByModel[body.name] ?? {},
+        };
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+  }
+
+  it("filters Chinese-origin models when baseUrl points at Ollama Cloud", async () => {
+    global.fetch = mockMixedOllama();
+    const result = await listModels({
+      provider: "ollama",
+      baseUrl: "https://ollama.com",
+    });
+    const names = result.map((m) => m.name);
+    expect(names).toEqual(["llama3.1:8b", "mistral:7b"]);
+  });
+
+  it("does NOT filter when baseUrl is a local / self-hosted Ollama", async () => {
+    global.fetch = mockMixedOllama();
+    const result = await listModels({
+      provider: "ollama",
+      baseUrl: "http://localhost:11434",
+    });
+    const names = result.map((m) => m.name);
+    expect(names).toEqual([
+      "llama3.1:8b",
+      "qwen2.5:7b",
+      "mistral:7b",
+      "deepseek-r1:32b",
+    ]);
+  });
+
+  it("does NOT filter when baseUrl is empty (treat as local default)", async () => {
+    global.fetch = mockMixedOllama();
+    const result = await listModels({ provider: "ollama" });
+    expect(result).toHaveLength(4);
+  });
+
+  it("returns an empty array when Cloud catalog is all-blocked", async () => {
+    global.fetch = vi.fn(async (url, init) => {
+      if (url.includes("/api/tags")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            models: [
+              { name: "qwen2.5:7b", modified_at: "2026-05-04T00:00:00Z" },
+              { name: "deepseek-r1:32b", modified_at: "2026-05-04T00:00:00Z" },
+            ],
+          }),
+        };
+      }
+      if (url.includes("/api/show")) {
+        const body = JSON.parse(init?.body ?? "{}");
+        const map = {
+          "qwen2.5:7b": { capabilities: ["tools"] },
+          "deepseek-r1:32b": { capabilities: ["tools"] },
+        };
+        return { ok: true, status: 200, json: async () => map[body.name] ?? {} };
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    const result = await listModels({
+      provider: "ollama",
+      baseUrl: "https://ollama.com",
+    });
+    expect(result).toEqual([]);
+  });
+
+  it("returns the full list unchanged when Cloud catalog is all-allowed", async () => {
+    global.fetch = vi.fn(async (url, init) => {
+      if (url.includes("/api/tags")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            models: [
+              { name: "llama3.1:8b", modified_at: "2026-05-04T00:00:00Z" },
+              { name: "gpt-oss:20b", modified_at: "2026-05-04T00:00:00Z" },
+            ],
+          }),
+        };
+      }
+      if (url.includes("/api/show")) {
+        const body = JSON.parse(init?.body ?? "{}");
+        const map = {
+          "llama3.1:8b": { capabilities: ["tools"] },
+          "gpt-oss:20b": { capabilities: ["tools"] },
+        };
+        return { ok: true, status: 200, json: async () => map[body.name] ?? {} };
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    const result = await listModels({
+      provider: "ollama",
+      baseUrl: "https://ollama.com",
+    });
+    expect(result.map((m) => m.name)).toEqual(["llama3.1:8b", "gpt-oss:20b"]);
+  });
+});
