@@ -661,6 +661,10 @@ export default function Chatbox({
       const result = await runChatSession({
         prompt: userText,
         model: selectedModel,
+        // Resolve per-model metadata (currently just `contextLength`) so the
+        // Ollama adapter can use the model's actual context window for num_ctx
+        // instead of a hardcoded value. Pre-2026-05-17 every model got 16384.
+        modelMetadata: discoveredModels.find((m) => m.name === selectedModel) ?? null,
         thinkingEnabled: isThinkingEnabled,
         signal: controller.signal,
         history: engineMessagesRef.current,

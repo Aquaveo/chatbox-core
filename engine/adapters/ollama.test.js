@@ -159,3 +159,108 @@ describe("ollama streamChat — error rendering", () => {
     ).rejects.toThrow(/Ollama proxy returned 502:/);
   });
 });
+
+// Streaming-success mock: returns a ReadableStream of one NDJSON chunk
+// with `done: true`. Captures the request body via fetchMock.mock.calls
+// so num_ctx assertions can inspect it.
+function mockStreamSuccess() {
+  return vi.fn(async () => {
+    const encoder = new TextEncoder();
+    return {
+      ok: true,
+      status: 200,
+      body: {
+        getReader() {
+          let sent = false;
+          return {
+            async read() {
+              if (sent) return { done: true, value: undefined };
+              sent = true;
+              return {
+                done: false,
+                value: encoder.encode(
+                  JSON.stringify({
+                    message: { role: "assistant", content: "ok" },
+                    done: true,
+                  }) + "\n",
+                ),
+              };
+            },
+          };
+        },
+      },
+    };
+  });
+}
+
+describe("ollama streamChat — num_ctx derivation from modelMetadata", () => {
+  function bodyFromFetchMock(fetchMock) {
+    const call = fetchMock.mock.calls[0];
+    return JSON.parse(call[1].body);
+  }
+
+  it("sends num_ctx equal to modelMetadata.contextLength when it's a positive number", async () => {
+    const fetchMock = mockStreamSuccess();
+    global.fetch = fetchMock;
+    await streamChat({
+      model: "gpt-oss:120b",
+      modelMetadata: { contextLength: 131072 },
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(bodyFromFetchMock(fetchMock).options.num_ctx).toBe(131072);
+  });
+
+  it("sends num_ctx 8192 when modelMetadata.contextLength is 8192", async () => {
+    const fetchMock = mockStreamSuccess();
+    global.fetch = fetchMock;
+    await streamChat({
+      model: "llama3.2:latest",
+      modelMetadata: { contextLength: 8192 },
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(bodyFromFetchMock(fetchMock).options.num_ctx).toBe(8192);
+  });
+
+  it("falls back to 16384 when modelMetadata is undefined", async () => {
+    const fetchMock = mockStreamSuccess();
+    global.fetch = fetchMock;
+    await streamChat({
+      model: "llama3.2:latest",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(bodyFromFetchMock(fetchMock).options.num_ctx).toBe(16384);
+  });
+
+  it("falls back to 16384 when modelMetadata is empty", async () => {
+    const fetchMock = mockStreamSuccess();
+    global.fetch = fetchMock;
+    await streamChat({
+      model: "llama3.2:latest",
+      modelMetadata: {},
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(bodyFromFetchMock(fetchMock).options.num_ctx).toBe(16384);
+  });
+
+  it("falls back to 16384 when modelMetadata.contextLength is 0 (proves pickNumCtx catches falsy values that `??` would not)", async () => {
+    const fetchMock = mockStreamSuccess();
+    global.fetch = fetchMock;
+    await streamChat({
+      model: "llama3.2:latest",
+      modelMetadata: { contextLength: 0 },
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(bodyFromFetchMock(fetchMock).options.num_ctx).toBe(16384);
+  });
+
+  it("falls back to 16384 when modelMetadata.contextLength is NaN", async () => {
+    const fetchMock = mockStreamSuccess();
+    global.fetch = fetchMock;
+    await streamChat({
+      model: "llama3.2:latest",
+      modelMetadata: { contextLength: NaN },
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(bodyFromFetchMock(fetchMock).options.num_ctx).toBe(16384);
+  });
+});
