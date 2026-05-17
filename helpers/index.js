@@ -469,20 +469,21 @@ export async function listModels(providerConfig = {}, options = {}) {
         if (!showResp.ok) {
           // eslint-disable-next-line no-console
           console.warn(`Ollama /api/show failed for ${name}: ${showResp.status}`);
-          return { name, capabilities: [], thinkingTypes: null };
+          return { name, capabilities: [], thinkingTypes: null, contextLength: null };
         }
         const showJson = await showResp.json();
         const caps = Array.isArray(showJson?.capabilities) ? showJson.capabilities : [];
         const result = {
           capabilities: caps.includes("tools") ? ["tools"] : [],
           thinkingTypes: caps.includes("thinking") ? { enabled: { supported: true } } : null,
+          contextLength: extractContextLength(showJson),
         };
         showCache[cacheKey] = result;
         return { name, ...result };
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn(`Ollama /api/show errored for ${name}:`, err?.message ?? err);
-        return { name, capabilities: [], thinkingTypes: null };
+        return { name, capabilities: [], thinkingTypes: null, contextLength: null };
       }
     };
 
@@ -491,7 +492,7 @@ export async function listModels(providerConfig = {}, options = {}) {
 
     const result = models.map((m, i) => ({
       name: m.name || m.model,
-      contextLength: 8192,
+      contextLength: pickNumCtx(enriched[i]),
       capabilities: enriched[i]?.capabilities ?? [],
       thinkingTypes: enriched[i]?.thinkingTypes ?? null,
     }));
@@ -557,6 +558,36 @@ async function mapWithConcurrency(items, limit, fn) {
   });
   await Promise.all(workers);
   return results;
+}
+
+// Conservative fallback when /api/show fails or model_info doesn't expose
+// a usable context_length. 16384 preserves pre-2026-05-17 behavior (the
+// previously-hardcoded value) so cold-cache requests don't regress for
+// models that worked before. Per-model values from /api/show take
+// precedence whenever they're available (see pickNumCtx + showOne).
+export const OLLAMA_NUM_CTX_FALLBACK = 16384;
+
+// Walk Ollama's /api/show response to extract the model's context window.
+// Shape: model_info["general.architecture"] is an arch string (e.g.
+// "llama", "qwen2", "gpt-oss"); the actual integer lives at
+// model_info["<arch>.context_length"]. Returns null on any missing,
+// empty, non-positive, or non-finite value so callers can fall back.
+export function extractContextLength(showJson) {
+  const arch = showJson?.model_info?.["general.architecture"];
+  if (typeof arch !== "string" || !arch) return null;
+  const value = showJson?.model_info?.[`${arch}.context_length`];
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
+  return value;
+}
+
+// Pick the num_ctx value to send Ollama for a given model. Guards against
+// zero, negative, NaN, and missing values — nullish coalescing alone would
+// let `contextLength: 0` propagate, which Ollama silently rejects.
+// Single source of truth for the guard; both helpers and the adapter call
+// this rather than re-implementing the check.
+export function pickNumCtx(modelMetadata) {
+  const v = modelMetadata?.contextLength;
+  return Number.isFinite(v) && v > 0 ? v : OLLAMA_NUM_CTX_FALLBACK;
 }
 
 // Cache /api/show capability lookups in localStorage keyed by
