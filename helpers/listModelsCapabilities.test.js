@@ -468,6 +468,26 @@ describe("listModels — OpenAI capability population", () => {
       result.find((m) => m.name === "ft:gpt-4o-mini-2024-07-18:my-org::abc").capabilities,
     ).toEqual(["tools"]);
   });
+
+  it("OpenAI models still emit contextLength: 8192 (Ollama plumbing does not cross-pollinate)", async () => {
+    vi.doMock("openai", () => {
+      class FakeOpenAI {
+        constructor() {
+          this.models = {
+            list: async () => ({
+              [Symbol.asyncIterator]: async function* () {
+                yield { id: "gpt-4o" };
+              },
+            }),
+          };
+        }
+      }
+      return { default: FakeOpenAI };
+    });
+    const { listModels: listModelsFresh } = await import("./index.js");
+    const result = await listModelsFresh({ provider: "openai", apiKey: "sk-test" });
+    expect(result[0].contextLength).toBe(8192);
+  });
 });
 
 // ---------------------------------------------------------------------------
