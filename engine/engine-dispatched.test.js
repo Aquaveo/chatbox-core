@@ -254,6 +254,57 @@ describe("_engine_dispatched — K3 truncation preserves field", () => {
     expect(forwarded._truncated).toBe(true);
   });
 
+  it("data-only success envelope: metadata + recovery hint preserved across truncation", async () => {
+    // Regression for 2026-05-18 production bug: a 240-row time-series
+    // response from query_output_files_from_output_selector blew the
+    // per-tool cap. The data-only `else` branch in the truncation block
+    // previously produced `{}` (plus the `_truncated` / `_engine_dispatched`
+    // markers), giving the LLM nothing to consume and nothing to retry
+    // against — it looped on the same query. The new contract: drop the
+    // bulk `data` array but preserve `ok`, `rows`, `columns`, `file_count`,
+    // `fix_hint`, and add a `_truncation_hint` describing how to recover.
+    const bloat = bloatString(MAX_TOOL_RESULT_CHARS + 100);
+    const forwarded = await runOne("big_query", {
+      ok: true,
+      rows: 240,
+      file_count: 10,
+      columns: ["time", "flow"],
+      data: [{ blob: bloat }],
+    });
+    expect(forwarded._truncated).toBe(true);
+    expect(forwarded._engine_dispatched).toEqual([]);
+    expect(forwarded.ok).toBe(true);
+    expect(forwarded.rows).toBe(240);
+    expect(forwarded.file_count).toBe(10);
+    expect(forwarded.columns).toEqual(["time", "flow"]);
+    // Bulk payload dropped.
+    expect(forwarded.data).toBeUndefined();
+    // Recovery hint present and mentions actionable retry options.
+    expect(forwarded._truncation_hint).toMatch(/WHERE|LIMIT|aggregate/i);
+  });
+
+  it("data-only error envelope: structured error survives truncation", async () => {
+    // Companion case to the success-metadata test: when an oversized
+    // result also carries a structured error (object with code+message),
+    // preserve the whole error object — not just the string form. The
+    // pre-fix path only kept `error` if it was a string, so envelopes
+    // with `error: {code, message}` lost their recovery context entirely.
+    const bloat = bloatString(MAX_TOOL_RESULT_CHARS + 100);
+    const forwarded = await runOne("big_error", {
+      ok: false,
+      error: { code: "invalid_query", message: "column 'foo' not found" },
+      fix_hint: "Use one of: time, flow.",
+      available_columns: [bloat],
+    });
+    expect(forwarded._truncated).toBe(true);
+    expect(forwarded.ok).toBe(false);
+    expect(forwarded.error).toEqual({
+      code: "invalid_query",
+      message: "column 'foo' not found",
+    });
+    expect(forwarded.fix_hint).toBe("Use one of: time, flow.");
+  });
+
   it("preserves field through layer_update truncation", async () => {
     const bloat = bloatString(MAX_TOOL_RESULT_CHARS + 100);
     const forwarded = await runOne("big_layer", {

@@ -921,11 +921,46 @@ export async function processToolCalls(
             patch_update: { uuid: toolResult.patch_update.uuid },
           };
         } else {
-          // Data-only oversized — preserve key shape, drop value bodies.
+          // Data-only oversized — preserve metadata so the LLM can either
+          // consume the result or rationalize a retry. Drop only the bulk
+          // payload fields (`data`, `files`, etc.). The earlier behavior
+          // ({} plus stringy `error`) left the LLM blind on success
+          // envelopes whose `data` array overflowed the cap: it saw only
+          // `_truncated: true` with no rows, columns, or row count, and
+          // would retry the same query in a loop expecting different
+          // results. Observed 2026-05-18 against a 240-row time-series
+          // query that legitimately blew the 4000-char cap. Now the LLM
+          // sees the shape metadata + a `_truncation_hint` describing
+          // what was dropped and how to recover.
           summary = {};
-          if (typeof toolResult.error === "string") {
+          if (toolResult.ok !== undefined) {
+            summary.ok = toolResult.ok;
+          }
+          if (toolResult.rows !== undefined) {
+            summary.rows = toolResult.rows;
+          }
+          if (toolResult.file_count !== undefined) {
+            summary.file_count = toolResult.file_count;
+          }
+          if (Array.isArray(toolResult.columns)) {
+            summary.columns = toolResult.columns;
+          }
+          // Structured error envelope (object with code/message) — preserve
+          // intact so the LLM gets full recovery context. String `error`
+          // (legacy shape) was already preserved; now both shapes survive.
+          if (toolResult.error && typeof toolResult.error === "object") {
+            summary.error = toolResult.error;
+          } else if (typeof toolResult.error === "string") {
             summary.error = toolResult.error;
           }
+          if (toolResult.fix_hint) {
+            summary.fix_hint = toolResult.fix_hint;
+          }
+          summary._truncation_hint =
+            "Result body dropped — response exceeded the per-tool size cap. " +
+            "Retry with WHERE filters, a smaller LIMIT, or an aggregate " +
+            "(COUNT, SUM, AVG) to fit. The `rows` / `columns` / `file_count` " +
+            "fields above describe what was returned before truncation.";
         }
         summary._engine_dispatched = dispatchedUuids;
         summary._truncated = true;
