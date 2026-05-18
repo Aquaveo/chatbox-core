@@ -33,12 +33,12 @@ vi.mock("./transports.js", async (importOriginal) => {
   const actual = await importOriginal();
   return {
     ...actual,
-    pickTransport: vi.fn(),
+    pickTransportWithRetry: vi.fn(),
     closeMcpConnection: vi.fn().mockResolvedValue(undefined),
   };
 });
 
-import { pickTransport, closeMcpConnection } from "./transports.js";
+import { pickTransportWithRetry, closeMcpConnection } from "./transports.js";
 import {
   discoverPrompts,
   getPrompt,
@@ -73,7 +73,7 @@ function makeFakeServerWithGetPromptResponse(messages) {
 let warnSpy;
 beforeEach(() => {
   warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-  pickTransport.mockReset();
+  pickTransportWithRetry.mockReset();
   closeMcpConnection.mockClear();
 });
 afterEach(() => {
@@ -86,7 +86,7 @@ afterEach(() => {
 
 describe("discoverPrompts — happy path", () => {
   it("collects prompts from two servers and builds promptServerMap", async () => {
-    pickTransport
+    pickTransportWithRetry
       .mockResolvedValueOnce(
         makeFakeServerWithPrompts([
           { name: "plot_timeseries", description: "Plot timeseries" },
@@ -141,7 +141,7 @@ describe("discoverPrompts — nil/empty input", () => {
       expect(result.promptServerMap.size).toBe(0);
 
       // The contract: no transport handshake on the no-op input.
-      expect(pickTransport).not.toHaveBeenCalled();
+      expect(pickTransportWithRetry).not.toHaveBeenCalled();
       expect(closeMcpConnection).not.toHaveBeenCalled();
     },
   );
@@ -153,7 +153,7 @@ describe("discoverPrompts — nil/empty input", () => {
 
 describe("discoverPrompts — name collision", () => {
   it("first server wins on same-name collision; console.warn fires once", async () => {
-    pickTransport
+    pickTransportWithRetry
       .mockResolvedValueOnce(
         makeFakeServerWithPrompts([
           { name: "duplicate_prompt", description: "First server" },
@@ -191,7 +191,7 @@ describe("discoverPrompts — name collision", () => {
 
 describe("discoverPrompts — empty per-server list", () => {
   it("server returns {prompts: []} → entry is [], promptCount 0, no error", async () => {
-    pickTransport.mockResolvedValueOnce(makeFakeServerWithPrompts([]));
+    pickTransportWithRetry.mockResolvedValueOnce(makeFakeServerWithPrompts([]));
 
     const result = await discoverPrompts([{ url: "http://x", name: "S" }]);
 
@@ -212,7 +212,7 @@ describe("discoverPrompts — error paths", () => {
     const methodNotFound = new Error("Method not found");
     methodNotFound.code = -32601;
 
-    pickTransport
+    pickTransportWithRetry
       .mockResolvedValueOnce(makeFakeServerWithListPromptsError(methodNotFound))
       .mockResolvedValueOnce(
         makeFakeServerWithPrompts([
@@ -247,7 +247,7 @@ describe("discoverPrompts — error paths", () => {
   });
 
   it("R10c: generic network error → entry [] + errorKey notMcpServer; transport closed", async () => {
-    pickTransport.mockResolvedValueOnce(
+    pickTransportWithRetry.mockResolvedValueOnce(
       makeFakeServerWithListPromptsError(new Error("network down")),
     );
 
@@ -258,14 +258,14 @@ describe("discoverPrompts — error paths", () => {
     expect(closeMcpConnection).toHaveBeenCalledTimes(1);
   });
 
-  it("transport-phase failure (pickTransport rejects) → entry [] + connectionFailed; no close", async () => {
-    pickTransport.mockRejectedValueOnce(new Error("connect refused"));
+  it("transport-phase failure (pickTransportWithRetry rejects) → entry [] + connectionFailed; no close", async () => {
+    pickTransportWithRetry.mockRejectedValueOnce(new Error("connect refused"));
 
     const result = await discoverPrompts([{ url: "http://x", name: "S" }]);
 
     expect(result.promptsByServer["0"]).toEqual([]);
     expect(result.perServer[0].errorKey).toBe(ERROR_KEYS.connectionFailed);
-    // pickTransport never returned a connection, so closeMcpConnection
+    // pickTransportWithRetry never returned a connection, so closeMcpConnection
     // shouldn't be called on a null conn.
     expect(closeMcpConnection).not.toHaveBeenCalled();
   });
@@ -273,7 +273,7 @@ describe("discoverPrompts — error paths", () => {
   it("transport-phase failure with errorKey already set → propagates that errorKey", async () => {
     const err = new Error("invalid scheme");
     err.errorKey = ERROR_KEYS.invalidScheme;
-    pickTransport.mockRejectedValueOnce(err);
+    pickTransportWithRetry.mockRejectedValueOnce(err);
 
     const result = await discoverPrompts([{ url: "file:///bad", name: "S" }]);
 
@@ -283,7 +283,7 @@ describe("discoverPrompts — error paths", () => {
   it("timeout (isTimeout=true) on listPrompts → entry [] + errorKey timeout; treated like R10c silent fallback", async () => {
     const timeoutErr = new Error("Operation timed out after 3000ms");
     timeoutErr.isTimeout = true;
-    pickTransport.mockResolvedValueOnce(
+    pickTransportWithRetry.mockResolvedValueOnce(
       makeFakeServerWithListPromptsError(timeoutErr),
     );
 
@@ -307,7 +307,7 @@ describe("getPrompt — text-only content filter (R7a)", () => {
       "feature id [feature_id] for output index [index] for the [forecast] " +
       "forecast on [model] model and date [date], cycle [cycle], and " +
       "vpu [vpu]";
-    pickTransport.mockResolvedValueOnce(
+    pickTransportWithRetry.mockResolvedValueOnce(
       makeFakeServerWithGetPromptResponse([
         {
           role: "user",
@@ -339,7 +339,7 @@ describe("getPrompt — text-only content filter (R7a)", () => {
   });
 
   it("filters out non-text content (image, resource); only text.text values appear", async () => {
-    pickTransport.mockResolvedValueOnce(
+    pickTransportWithRetry.mockResolvedValueOnce(
       makeFakeServerWithGetPromptResponse([
         {
           role: "user",
@@ -369,7 +369,7 @@ describe("getPrompt — text-only content filter (R7a)", () => {
   });
 
   it("concatenates text across multiple messages in order", async () => {
-    pickTransport.mockResolvedValueOnce(
+    pickTransportWithRetry.mockResolvedValueOnce(
       makeFakeServerWithGetPromptResponse([
         { role: "user", content: { type: "text", text: "alpha " } },
         { role: "assistant", content: { type: "text", text: "beta " } },
@@ -388,7 +388,7 @@ describe("getPrompt — text-only content filter (R7a)", () => {
   });
 
   it("closes transport after successful resolve", async () => {
-    pickTransport.mockResolvedValueOnce(
+    pickTransportWithRetry.mockResolvedValueOnce(
       makeFakeServerWithGetPromptResponse([
         { role: "user", content: { type: "text", text: "ok" } },
       ]),
@@ -406,7 +406,7 @@ describe("getPrompt — text-only content filter (R7a)", () => {
 
 describe("getPrompt — empty resolved text", () => {
   it("throws EmptyPromptError when no messages", async () => {
-    pickTransport.mockResolvedValueOnce(makeFakeServerWithGetPromptResponse([]));
+    pickTransportWithRetry.mockResolvedValueOnce(makeFakeServerWithGetPromptResponse([]));
 
     await expect(
       getPrompt(0, "empty", {}, [{ url: "http://x", name: "S" }]),
@@ -414,7 +414,7 @@ describe("getPrompt — empty resolved text", () => {
   });
 
   it("throws EmptyPromptError when all content is non-text", async () => {
-    pickTransport.mockResolvedValueOnce(
+    pickTransportWithRetry.mockResolvedValueOnce(
       makeFakeServerWithGetPromptResponse([
         {
           role: "user",
@@ -432,7 +432,7 @@ describe("getPrompt — empty resolved text", () => {
   });
 
   it("throws EmptyPromptError when text values are all empty strings", async () => {
-    pickTransport.mockResolvedValueOnce(
+    pickTransportWithRetry.mockResolvedValueOnce(
       makeFakeServerWithGetPromptResponse([
         { role: "user", content: { type: "text", text: "" } },
         { role: "assistant", content: { type: "text", text: "" } },
@@ -445,7 +445,7 @@ describe("getPrompt — empty resolved text", () => {
   });
 
   it("closes transport even when EmptyPromptError is thrown", async () => {
-    pickTransport.mockResolvedValueOnce(makeFakeServerWithGetPromptResponse([]));
+    pickTransportWithRetry.mockResolvedValueOnce(makeFakeServerWithGetPromptResponse([]));
 
     await expect(
       getPrompt(0, "empty", {}, [{ url: "http://x", name: "S" }]),

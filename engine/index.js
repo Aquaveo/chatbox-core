@@ -22,7 +22,7 @@ import {
   stripThinkTags,
 } from "../helpers/index.js";
 import {
-  pickTransport,
+  pickTransportWithRetry,
   closeMcpConnection,
   withTimeout,
   LIST_TOOLS_BUDGET_MS,
@@ -239,7 +239,7 @@ export async function connectMcpServers(mcpServers) {
     let phase = "transport";
 
     try {
-      const conn = await pickTransport(server.url);
+      const conn = await pickTransportWithRetry(server.url);
       connections.push(conn);
 
       phase = "list_tools";
@@ -408,7 +408,7 @@ export async function discoverPrompts(mcpServers) {
     let errorKey = null;
 
     try {
-      conn = await pickTransport(server.url);
+      conn = await pickTransportWithRetry(server.url);
       phase = "list_prompts";
       const response = await withTimeout(
         conn.client.listPrompts(),
@@ -485,7 +485,7 @@ export async function getPrompt(serverIdx, promptName, args, mcpServers) {
 
   let conn = null;
   try {
-    conn = await pickTransport(server.url);
+    conn = await pickTransportWithRetry(server.url);
     const result = await conn.client.getPrompt({
       name: promptName,
       arguments: args ?? {},

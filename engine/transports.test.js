@@ -51,6 +51,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import {
   closeMcpConnection,
   pickTransport,
+  pickTransportWithRetry,
   validateServerUrl,
   withTimeout,
 } from "./transports.js";
@@ -318,6 +319,120 @@ describe("pickTransport", () => {
 // ---------------------------------------------------------------------------
 // closeMcpConnection
 // ---------------------------------------------------------------------------
+
+// Debug session 2026-05-18 — freshly-added MCP servers on cold-starting
+// hosts (Cloud Run free tier) failed the first connection attempt and
+// surfaced as red status dots / empty prompt lists. `pickTransportWithRetry`
+// wraps `pickTransport` with one retry on transient connection-level
+// failures while fail-fast'ing on precondition errors. These tests pin
+// both behaviors.
+describe("pickTransportWithRetry", () => {
+  beforeEach(() => {
+    MCPClient.mockImplementation(() => ({
+      connect: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+    }));
+    SSEClientTransport.mockImplementation(() => ({ close: vi.fn() }));
+    StreamableHTTPClientTransport.mockImplementation(() => ({ close: vi.fn() }));
+  });
+
+  it("returns the connection on first-attempt success without retrying", async () => {
+    const httpCtor = vi.fn().mockReturnValue({ close: vi.fn() });
+    StreamableHTTPClientTransport.mockImplementation(httpCtor);
+    const result = await pickTransportWithRetry("https://example.com/mcp");
+    expect(result).toBeTruthy();
+    // Only one constructor invocation — no retry fired.
+    expect(httpCtor).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries once on transient connection-failed and succeeds on the second attempt", async () => {
+    // First connect rejects; second resolves. Use the MCPClient.connect
+    // hook because it's the deepest controllable point of pickTransport.
+    const connectMock = vi
+      .fn()
+      .mockRejectedValueOnce(Object.assign(new Error("ECONNRESET"), { errorKey: ERROR_KEYS.connectionFailed }))
+      .mockResolvedValueOnce(undefined);
+    MCPClient.mockImplementation(() => ({
+      connect: connectMock,
+      close: vi.fn().mockResolvedValue(undefined),
+    }));
+    const result = await pickTransportWithRetry("https://example.com/mcp", { backoffMs: 1 });
+    expect(result).toBeTruthy();
+    expect(connectMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries once on timeout and succeeds on the second attempt", async () => {
+    const connectMock = vi
+      .fn()
+      .mockRejectedValueOnce(Object.assign(new Error("timed out"), { errorKey: ERROR_KEYS.timeout, isTimeout: true }))
+      .mockResolvedValueOnce(undefined);
+    MCPClient.mockImplementation(() => ({
+      connect: connectMock,
+      close: vi.fn().mockResolvedValue(undefined),
+    }));
+    const result = await pickTransportWithRetry("https://example.com/mcp", { backoffMs: 1 });
+    expect(result).toBeTruthy();
+    expect(connectMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does NOT retry on mixed-content (precondition error) — fails fast", async () => {
+    // `pickTransport` calls preCheckUrl which throws mixed-content when
+    // an https page tries to connect to http. The retry wrapper must
+    // propagate this immediately (retrying makes no sense — the scheme
+    // mismatch is deterministic).
+    const originalLocation = window.location;
+    Object.defineProperty(window, "location", {
+      value: { ...originalLocation, protocol: "https:" },
+      writable: true,
+      configurable: true,
+    });
+    try {
+      let connectCallCount = 0;
+      MCPClient.mockImplementation(() => ({
+        connect: vi.fn().mockImplementation(() => { connectCallCount++; return Promise.resolve(); }),
+        close: vi.fn().mockResolvedValue(undefined),
+      }));
+      await expect(
+        pickTransportWithRetry("http://example.com/mcp", { backoffMs: 1 }),
+      ).rejects.toMatchObject({ errorKey: ERROR_KEYS.mixedContent });
+      // No retry — the connect mock was never reached on either attempt.
+      expect(connectCallCount).toBe(0);
+    } finally {
+      Object.defineProperty(window, "location", {
+        value: originalLocation,
+        writable: true,
+        configurable: true,
+      });
+    }
+  });
+
+  it("throws the last error after maxAttempts retries on persistent transient failure", async () => {
+    const persistentErr = Object.assign(new Error("network down"), { errorKey: ERROR_KEYS.connectionFailed });
+    const connectMock = vi.fn().mockRejectedValue(persistentErr);
+    MCPClient.mockImplementation(() => ({
+      connect: connectMock,
+      close: vi.fn().mockResolvedValue(undefined),
+    }));
+    await expect(
+      pickTransportWithRetry("https://example.com/mcp", { backoffMs: 1 }),
+    ).rejects.toMatchObject({ errorKey: ERROR_KEYS.connectionFailed });
+    // Exactly maxAttempts attempts (default 2).
+    expect(connectMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("honors maxAttempts override (e.g., 3 attempts → 3 connect calls on persistent failure)", async () => {
+    const persistentErr = Object.assign(new Error("network down"), { errorKey: ERROR_KEYS.connectionFailed });
+    const connectMock = vi.fn().mockRejectedValue(persistentErr);
+    MCPClient.mockImplementation(() => ({
+      connect: connectMock,
+      close: vi.fn().mockResolvedValue(undefined),
+    }));
+    await expect(
+      pickTransportWithRetry("https://example.com/mcp", { maxAttempts: 3, backoffMs: 1 }),
+    ).rejects.toMatchObject({ errorKey: ERROR_KEYS.connectionFailed });
+    expect(connectMock).toHaveBeenCalledTimes(3);
+  });
+});
 
 describe("closeMcpConnection", () => {
   it("calls transport.close() on a real connection", async () => {
