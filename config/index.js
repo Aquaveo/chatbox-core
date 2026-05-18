@@ -18,8 +18,13 @@ export const CONTEXT_BUDGET_RATIO = 0.8;
 
 // Max characters for a single tool result stored in conversation history.
 // Results exceeding this are truncated to prevent context bloat across rounds.
-// 4000 chars ≈ 1000 tokens — enough for the LLM to see structure + first results.
-export const MAX_TOOL_RESULT_CHARS = 4000;
+// 20000 chars ≈ 5000 tokens — fits a typical time-series query (240 rows of
+// ~70 chars/row ≈ 17 KB) without losing the data array. Modern LLMs have
+// 128K+ token contexts, so per-result generosity here is cheap; the earlier
+// 4000-char cap silently truncated legitimate data-extraction responses and
+// forced LLMs into retry loops. Truncation still kicks in for runaway results
+// (the data-only branch preserves metadata + emits a recovery hint).
+export const MAX_TOOL_RESULT_CHARS = 20000;
 
 // Tool names that are always included in the selected tool set regardless of
 // keyword relevance. These enable the LLM to discover and invoke any tool.
