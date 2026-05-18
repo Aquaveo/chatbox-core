@@ -233,6 +233,11 @@ async function attemptConnect({ url, kind, budgetMs }) {
  *
  * Pre-checks scheme + mixed-content BEFORE constructing any transport, so
  * the probe path and the send path share one taxonomy (finding #6).
+ *
+ * For most callers, prefer `pickTransportWithRetry` — it wraps this function
+ * with a bounded retry that recovers from transient cold-start failures
+ * common on free-tier hosting (e.g., Cloud Run cold-start; first CORS
+ * preflight race; TCP handshake jitter).
  */
 export async function pickTransport(serverUrl) {
   const url = normalizeBaseUrl(serverUrl);
@@ -264,4 +269,47 @@ export async function pickTransport(serverUrl) {
 export async function closeMcpConnection(connection) {
   if (!connection?.transport) return;
   try { await connection.transport.close(); } catch { /* best effort */ }
+}
+
+/**
+ * Wrap `pickTransport` with a bounded retry for transient transport-level
+ * failures. Without this, freshly-added MCP servers on cold-starting hosts
+ * (e.g., nrds-mcps on Cloud Run free tier) fail the first connection
+ * attempt and surface as red status dots / empty prompt lists, while the
+ * second attempt — triggered by a user toggling the server or reloading
+ * the page — succeeds against the now-warm host.
+ *
+ * Retries only on connection-level errors (`connection-failed`, `timeout`,
+ * and unkeyed throws). Precondition failures (`mixed-content`,
+ * `invalid-scheme`) are deterministic and fail fast.
+ *
+ * Default policy: 2 total attempts (1 initial + 1 retry), 1500ms backoff.
+ * Worst-case added latency for a permanently-broken URL is the backoff
+ * (~1.5s) — the first attempt's timeout dominates either way.
+ *
+ * See debug session 2026-05-18 — both the probe-red-on-first-add and the
+ * "need to reload to see prompts/tools" symptoms trace to single-shot
+ * `pickTransport` calls in `engine/probe.js`, `discoverPrompts`, and
+ * `connectMcpServers`.
+ */
+export async function pickTransportWithRetry(
+  serverUrl,
+  { maxAttempts = 2, backoffMs = 1500 } = {},
+) {
+  let lastErr;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      return await pickTransport(serverUrl);
+    } catch (err) {
+      lastErr = err;
+      const isPrecondition =
+        err?.errorKey === ERROR_KEYS.mixedContent ||
+        err?.errorKey === ERROR_KEYS.invalidScheme;
+      if (isPrecondition) throw err;
+      if (attempt < maxAttempts - 1) {
+        await new Promise((r) => setTimeout(r, backoffMs));
+      }
+    }
+  }
+  throw lastErr;
 }

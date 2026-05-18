@@ -33,12 +33,12 @@ vi.mock("./transports.js", async (importOriginal) => {
   const actual = await importOriginal();
   return {
     ...actual,
-    pickTransport: vi.fn(),
+    pickTransportWithRetry: vi.fn(),
     closeMcpConnection: vi.fn().mockResolvedValue(undefined),
   };
 });
 
-import { pickTransport } from "./transports.js";
+import { pickTransportWithRetry } from "./transports.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -77,7 +77,7 @@ function makeFakeServerWithTools(tools) {
 let warnSpy;
 beforeEach(() => {
   warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-  pickTransport.mockReset();
+  pickTransportWithRetry.mockReset();
 });
 afterEach(() => {
   warnSpy.mockRestore();
@@ -89,7 +89,7 @@ afterEach(() => {
 
 describe("toolTagsByName — tag capture during connectMcpServers", () => {
   it("captures tags from a single tool with a populated tags array", async () => {
-    pickTransport.mockResolvedValueOnce(
+    pickTransportWithRetry.mockResolvedValueOnce(
       makeFakeServerWithTools([
         {
           name: "create_plotly_chart",
@@ -110,7 +110,7 @@ describe("toolTagsByName — tag capture during connectMcpServers", () => {
   });
 
   it("stores [] for a tool registered without a tags field", async () => {
-    pickTransport.mockResolvedValueOnce(
+    pickTransportWithRetry.mockResolvedValueOnce(
       makeFakeServerWithTools([
         {
           name: "data_only_tool",
@@ -127,7 +127,7 @@ describe("toolTagsByName — tag capture during connectMcpServers", () => {
   });
 
   it("first-wins when two servers expose the same tool name with different tags", async () => {
-    pickTransport
+    pickTransportWithRetry
       .mockResolvedValueOnce(
         makeFakeServerWithTools([
           {
@@ -165,7 +165,7 @@ describe("toolTagsByName — tag capture during connectMcpServers", () => {
   });
 
   it("returns an empty Map when no servers expose any tools", async () => {
-    pickTransport.mockResolvedValueOnce(makeFakeServerWithTools([]));
+    pickTransportWithRetry.mockResolvedValueOnce(makeFakeServerWithTools([]));
 
     const result = await connectMcpServers([{ url: "http://x", name: "S" }]);
 

@@ -19,7 +19,7 @@
 
 import { ERROR_KEYS } from "./mcpErrors.js";
 import {
-  pickTransport,
+  pickTransportWithRetry,
   closeMcpConnection,
   withTimeout,
   LIST_TOOLS_BUDGET_MS,
@@ -48,7 +48,7 @@ export async function probeMcpServer(url) {
   let conn = null;
   let phase = "transport";
   try {
-    conn = await pickTransport(url);
+    conn = await pickTransportWithRetry(url);
     phase = "list_tools";
     const response = await withTimeout(conn.client.listTools(), LIST_TOOLS_BUDGET_MS);
     const tools = Array.isArray(response?.tools) ? response.tools : [];
@@ -104,7 +104,7 @@ export function createProbeScheduler({ onUpdate, concurrency = DEFAULT_CONCURREN
     let result;
     let phase = "transport";
     try {
-      entry.conn = await pickTransport(url);
+      entry.conn = await pickTransportWithRetry(url);
       phase = "list_tools";
       const response = await withTimeout(
         entry.conn.client.listTools(),
