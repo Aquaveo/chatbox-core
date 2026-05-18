@@ -15,7 +15,113 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { listModels, openAiSupportsTools } from "./index.js";
+import {
+  extractContextLength,
+  listModels,
+  openAiSupportsTools,
+  OLLAMA_NUM_CTX_FALLBACK,
+  pickNumCtx,
+} from "./index.js";
+
+describe("extractContextLength (parses model_info[<arch>.context_length])", () => {
+  it("returns the context_length when general.architecture + <arch>.context_length are both present", () => {
+    expect(
+      extractContextLength({
+        model_info: {
+          "general.architecture": "llama",
+          "llama.context_length": 8192,
+        },
+      }),
+    ).toBe(8192);
+    expect(
+      extractContextLength({
+        model_info: {
+          "general.architecture": "gpt-oss",
+          "gpt-oss.context_length": 131072,
+        },
+      }),
+    ).toBe(131072);
+    expect(
+      extractContextLength({
+        model_info: {
+          "general.architecture": "qwen2",
+          "qwen2.context_length": 32768,
+        },
+      }),
+    ).toBe(32768);
+  });
+
+  it("returns null when model_info is missing", () => {
+    expect(extractContextLength({})).toBeNull();
+    expect(extractContextLength(undefined)).toBeNull();
+    expect(extractContextLength(null)).toBeNull();
+  });
+
+  it("returns null when general.architecture is missing or empty", () => {
+    expect(extractContextLength({ model_info: {} })).toBeNull();
+    expect(extractContextLength({ model_info: { "general.architecture": "" } })).toBeNull();
+    expect(extractContextLength({ model_info: { "general.architecture": null } })).toBeNull();
+  });
+
+  it("returns null when <arch>.context_length is missing", () => {
+    expect(
+      extractContextLength({
+        model_info: { "general.architecture": "llama" },
+      }),
+    ).toBeNull();
+  });
+
+  it("returns null when <arch>.context_length is zero, negative, or non-finite", () => {
+    expect(
+      extractContextLength({
+        model_info: { "general.architecture": "llama", "llama.context_length": 0 },
+      }),
+    ).toBeNull();
+    expect(
+      extractContextLength({
+        model_info: { "general.architecture": "llama", "llama.context_length": -1 },
+      }),
+    ).toBeNull();
+    expect(
+      extractContextLength({
+        model_info: { "general.architecture": "llama", "llama.context_length": NaN },
+      }),
+    ).toBeNull();
+    expect(
+      extractContextLength({
+        model_info: { "general.architecture": "llama", "llama.context_length": "8192" },
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("pickNumCtx (guard against zero / NaN / missing contextLength)", () => {
+  it("returns the contextLength when it's a positive finite number", () => {
+    expect(pickNumCtx({ contextLength: 131072 })).toBe(131072);
+    expect(pickNumCtx({ contextLength: 8192 })).toBe(8192);
+    expect(pickNumCtx({ contextLength: 1 })).toBe(1);
+  });
+
+  it("falls back to OLLAMA_NUM_CTX_FALLBACK on zero, negative, NaN, or missing", () => {
+    expect(pickNumCtx({ contextLength: 0 })).toBe(OLLAMA_NUM_CTX_FALLBACK);
+    expect(pickNumCtx({ contextLength: -1 })).toBe(OLLAMA_NUM_CTX_FALLBACK);
+    expect(pickNumCtx({ contextLength: NaN })).toBe(OLLAMA_NUM_CTX_FALLBACK);
+    expect(pickNumCtx({ contextLength: undefined })).toBe(OLLAMA_NUM_CTX_FALLBACK);
+    expect(pickNumCtx({ contextLength: null })).toBe(OLLAMA_NUM_CTX_FALLBACK);
+    expect(pickNumCtx({ contextLength: "8192" })).toBe(OLLAMA_NUM_CTX_FALLBACK);
+  });
+
+  it("falls back when modelMetadata itself is missing", () => {
+    expect(pickNumCtx(undefined)).toBe(OLLAMA_NUM_CTX_FALLBACK);
+    expect(pickNumCtx(null)).toBe(OLLAMA_NUM_CTX_FALLBACK);
+    expect(pickNumCtx({})).toBe(OLLAMA_NUM_CTX_FALLBACK);
+  });
+
+  it("OLLAMA_NUM_CTX_FALLBACK is 16384", () => {
+    // Pin the fallback value — preserves pre-2026-05-17 behavior for cold-cache requests.
+    expect(OLLAMA_NUM_CTX_FALLBACK).toBe(16384);
+  });
+});
 
 describe("openAiSupportsTools (name-pattern check)", () => {
   it("matches current chat-completion families", () => {
@@ -97,7 +203,8 @@ describe("listModels — Ollama capability discovery via /api/show", () => {
     expect(result).toEqual([
       {
         name: "llama3.2:latest",
-        contextLength: 8192,
+        // No model_info in this mock → extractContextLength returns null → pickNumCtx falls back.
+        contextLength: OLLAMA_NUM_CTX_FALLBACK,
         capabilities: ["tools"],
         thinkingTypes: null,
       },
@@ -204,6 +311,92 @@ describe("listModels — Ollama capability discovery via /api/show", () => {
     expect(result[0].capabilities).toEqual(["tools"]);
   });
 
+  it("populates contextLength from model_info[<arch>.context_length] when /api/show provides it", async () => {
+    global.fetch = mockOllamaFetch({
+      tags: [{ name: "gpt-oss:120b", modified_at: "2026-05-17T00:00:00Z" }],
+      showByModel: {
+        "gpt-oss:120b": {
+          capabilities: ["completion", "tools"],
+          model_info: {
+            "general.architecture": "gpt-oss",
+            "gpt-oss.context_length": 131072,
+          },
+        },
+      },
+    });
+    const result = await listModels({ provider: "ollama" });
+    expect(result[0].contextLength).toBe(131072);
+  });
+
+  it("falls back to OLLAMA_NUM_CTX_FALLBACK when /api/show lacks model_info entirely", async () => {
+    global.fetch = mockOllamaFetch({
+      tags: [{ name: "legacy:latest", modified_at: "2024-01-01T00:00:00Z" }],
+      showByModel: {
+        "legacy:latest": { capabilities: ["completion", "tools"] },
+      },
+    });
+    const result = await listModels({ provider: "ollama" });
+    expect(result[0].contextLength).toBe(OLLAMA_NUM_CTX_FALLBACK);
+  });
+
+  it("falls back when /api/show fails for a model (no cached contextLength)", async () => {
+    global.fetch = mockOllamaFetch({
+      tags: [{ name: "broken:latest", modified_at: "2026-05-04T00:00:00Z" }],
+      showByModel: {
+        // omitted → 404
+      },
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = await listModels({ provider: "ollama" });
+    expect(result[0].contextLength).toBe(OLLAMA_NUM_CTX_FALLBACK);
+  });
+
+  it("caches contextLength and serves it on subsequent calls without refetching /api/show", async () => {
+    const fetchMock = mockOllamaFetch({
+      tags: [{ name: "qwen2:7b", modified_at: "2026-05-17T00:00:00Z" }],
+      showByModel: {
+        "qwen2:7b": {
+          capabilities: ["completion", "tools"],
+          model_info: {
+            "general.architecture": "qwen2",
+            "qwen2.context_length": 32768,
+          },
+        },
+      },
+    });
+    global.fetch = fetchMock;
+
+    const first = await listModels({ provider: "ollama" });
+    expect(first[0].contextLength).toBe(32768);
+    const firstShowCount = fetchMock.mock.calls.filter((c) => c[0].includes("/api/show")).length;
+    expect(firstShowCount).toBe(1);
+
+    const second = await listModels({ provider: "ollama" });
+    expect(second[0].contextLength).toBe(32768);
+    const secondShowCount = fetchMock.mock.calls.filter((c) => c[0].includes("/api/show")).length;
+    expect(secondShowCount).toBe(1); // cache hit — no second /api/show
+  });
+
+  it("falls back for an old cache entry that lacks contextLength (first-deploy transient)", async () => {
+    // Seed cache with a pre-2026-05-17 entry shape: no contextLength field.
+    const cacheKey = "default|llama3.2:latest|2026-05-04T00:00:00Z";
+    localStorage.setItem(
+      "@chatbox/core:ollamaShowCache:v1",
+      JSON.stringify({
+        [cacheKey]: { capabilities: ["tools"], thinkingTypes: null },
+        // ← no `contextLength` field, like a stale v1 entry
+      }),
+    );
+
+    global.fetch = mockOllamaFetch({
+      tags: [{ name: "llama3.2:latest", modified_at: "2026-05-04T00:00:00Z" }],
+      showByModel: {}, // shouldn't be hit — cache satisfies the lookup
+    });
+
+    const result = await listModels({ provider: "ollama" });
+    expect(result[0].contextLength).toBe(OLLAMA_NUM_CTX_FALLBACK);
+  });
+
   it("bounds concurrency for /api/show fan-out", async () => {
     let inFlight = 0;
     let maxInFlight = 0;
@@ -274,6 +467,26 @@ describe("listModels — OpenAI capability population", () => {
     expect(
       result.find((m) => m.name === "ft:gpt-4o-mini-2024-07-18:my-org::abc").capabilities,
     ).toEqual(["tools"]);
+  });
+
+  it("OpenAI models still emit contextLength: 8192 (Ollama plumbing does not cross-pollinate)", async () => {
+    vi.doMock("openai", () => {
+      class FakeOpenAI {
+        constructor() {
+          this.models = {
+            list: async () => ({
+              [Symbol.asyncIterator]: async function* () {
+                yield { id: "gpt-4o" };
+              },
+            }),
+          };
+        }
+      }
+      return { default: FakeOpenAI };
+    });
+    const { listModels: listModelsFresh } = await import("./index.js");
+    const result = await listModelsFresh({ provider: "openai", apiKey: "sk-test" });
+    expect(result[0].contextLength).toBe(8192);
   });
 });
 

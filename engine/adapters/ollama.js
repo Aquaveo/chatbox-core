@@ -4,10 +4,10 @@
  * Parses Ollama's NDJSON streaming format.
  * For local Ollama, use the OpenAI adapter with baseUrl="http://localhost:11434/v1".
  */
-import { mergeToolCalls } from "../../helpers/index.js";
+import { mergeToolCalls, pickNumCtx } from "../../helpers/index.js";
 
 export async function streamChat({
-  baseUrl, apiKey, model,
+  baseUrl, apiKey, model, modelMetadata,
   messages, tools, csrfToken, signal,
   onThinkingChunk, onContentChunk,
 }) {
@@ -18,7 +18,7 @@ export async function streamChat({
     messages,
     tools: tools?.length ? tools : undefined,
     stream: true,
-    options: { temperature: 0, num_ctx: 16384 },
+    options: { temperature: 0, num_ctx: pickNumCtx(modelMetadata) },
   };
 
   const response = await fetch(`${proxyBase}/api/chat/`, {

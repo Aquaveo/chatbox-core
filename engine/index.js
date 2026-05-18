@@ -583,7 +583,7 @@ export function resolveEmptyAssistantText(rawText, state) {
 
 
 async function streamWithAdapter({
-  messages, tools, model, thinkingEnabled,
+  messages, tools, model, modelMetadata, thinkingEnabled,
   onThinkingChunk, onContentChunk, providerConfig, csrfToken, signal,
 }) {
   const { provider } = providerConfig;
@@ -592,6 +592,7 @@ async function streamWithAdapter({
   return adapter({
     ...providerConfig,
     model,
+    modelMetadata,
     messages,
     tools,
     csrfToken,
@@ -985,6 +986,7 @@ export async function processToolCalls(
 export async function runChatSession({
   prompt,
   model,
+  modelMetadata = null,
   thinkingEnabled,
   onThinkingChunk,
   onContentChunk,
@@ -1114,7 +1116,7 @@ export async function runChatSession({
       state.toolCallsThisTurn = [];
 
       const response = await streamWithAdapter({
-        messages, tools: selectedTools, model, thinkingEnabled,
+        messages, tools: selectedTools, model, modelMetadata, thinkingEnabled,
         onThinkingChunk, onContentChunk, providerConfig, csrfToken, signal,
       });
 
@@ -1283,7 +1285,7 @@ export async function runChatSession({
           let repairResponse;
           try {
             repairResponse = await streamWithAdapter({
-              messages, tools: selectedTools, model, thinkingEnabled,
+              messages, tools: selectedTools, model, modelMetadata, thinkingEnabled,
               onThinkingChunk, onContentChunk, providerConfig, csrfToken, signal,
             });
           } catch (error) {
