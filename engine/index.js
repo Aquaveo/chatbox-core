@@ -404,7 +404,7 @@ function _isMethodNotFound(err) {
  *   perServer: Array<{serverId: string, promptCount: number, errorKey: ?string}>
  * }>}
  */
-export async function discoverPrompts(mcpServers) {
+export async function discoverPrompts(mcpServers, { cache, memo } = {}) {
   // Nil/empty contract — return synchronously, no transport opened.
   if (!Array.isArray(mcpServers) || mcpServers.length === 0) {
     return {
@@ -412,6 +412,21 @@ export async function discoverPrompts(mcpServers) {
       promptServerMap: new Map(),
       perServer: [],
     };
+  }
+
+  // Plan 2026-05-19-002 — memoize by sorted-URL-set key. When the
+  // caller's `allMcpServers` reference changes but the URLs are
+  // unchanged, return the prior result without opening any transport.
+  // The memo is caller-held (Chatbox.jsx useRef) so its lifetime
+  // matches the Chatbox mount.
+  const urlsKey =
+    mcpServers
+      .map((s) => s?.url)
+      .filter((u) => typeof u === "string")
+      .sort()
+      .join("|");
+  if (memo && memo.lastUrlsKey === urlsKey && memo.lastResult) {
+    return memo.lastResult;
   }
 
   const promptsByServer = {};
@@ -423,12 +438,22 @@ export async function discoverPrompts(mcpServers) {
     const serverId = String(i);
     promptsByServer[serverId] = [];
 
+    // When a cache is in use, the cached entry already shares a
+    // transport with the tool path — no fresh open + no close-on-finally.
+    // Without a cache, fall back to today's transient pattern.
     let conn = null;
+    let ownedByCache = false;
     let phase = "transport";
     let errorKey = null;
 
     try {
-      conn = await pickTransportWithRetry(server.url);
+      if (cache) {
+        const entry = await cache.getOrOpen(server.url);
+        conn = entry.conn;
+        ownedByCache = true;
+      } else {
+        conn = await pickTransportWithRetry(server.url);
+      }
       phase = "list_prompts";
       const response = await withTimeout(
         conn.client.listPrompts(),
@@ -465,7 +490,9 @@ export async function discoverPrompts(mcpServers) {
         errorKey = error?.errorKey ?? ERROR_KEYS.connectionFailed;
       }
     } finally {
-      if (conn) {
+      // Only close transient connections — cache-owned transports stay
+      // open for reuse across discoverPrompts / runChatSession / getPrompt.
+      if (conn && !ownedByCache) {
         await closeMcpConnection(conn);
       }
     }
@@ -477,7 +504,16 @@ export async function discoverPrompts(mcpServers) {
     });
   }
 
-  return { promptsByServer, promptServerMap, perServer };
+  const result = { promptsByServer, promptServerMap, perServer };
+
+  // Plan 2026-05-19-002 — persist into the caller's memo so the next
+  // call with the same URL set short-circuits.
+  if (memo) {
+    memo.lastUrlsKey = urlsKey;
+    memo.lastResult = result;
+  }
+
+  return result;
 }
 
 /**
@@ -497,15 +533,22 @@ export async function discoverPrompts(mcpServers) {
  * @param {Array} mcpServers
  * @returns {Promise<string>}
  */
-export async function getPrompt(serverIdx, promptName, args, mcpServers) {
+export async function getPrompt(serverIdx, promptName, args, mcpServers, { cache } = {}) {
   const server = mcpServers?.[serverIdx];
   if (!server) {
     throw new Error(`No MCP server at index ${serverIdx}`);
   }
 
   let conn = null;
+  let ownedByCache = false;
   try {
-    conn = await pickTransportWithRetry(server.url);
+    if (cache) {
+      const entry = await cache.getOrOpen(server.url);
+      conn = entry.conn;
+      ownedByCache = true;
+    } else {
+      conn = await pickTransportWithRetry(server.url);
+    }
     const result = await conn.client.getPrompt({
       name: promptName,
       arguments: args ?? {},
@@ -532,8 +575,23 @@ export async function getPrompt(serverIdx, promptName, args, mcpServers) {
       );
     }
     return text;
+  } catch (err) {
+    // Plan 2026-05-19-002 — invalidate the cached transport on error so
+    // the next operation reopens fresh. Best-effort; don't block the
+    // throw on the close. EmptyPromptError isn't a transport problem
+    // but it's a single forgivable cost to invalidate it too — the
+    // alternative (typeof-checking error class) leaks knowledge across
+    // module boundaries. The next getPrompt re-opens the transport.
+    if (cache && ownedByCache) {
+      cache.invalidate(server.url).catch(() => {
+        /* best effort */
+      });
+    }
+    throw err;
   } finally {
-    if (conn) {
+    // Only close transient connections — cache-owned transports stay
+    // open for reuse across other operations on the same URL.
+    if (conn && !ownedByCache) {
       await closeMcpConnection(conn);
     }
   }
