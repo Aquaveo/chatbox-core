@@ -317,8 +317,11 @@ describe("Chatbox prompts discovery — R3 mount + change", () => {
     // because the default beforeEach resolves with the empty envelope.
     const { container } = await renderChatbox({ mcpServers: [] });
     const textarea = container.querySelector("textarea");
-    // No "or / for templates" hint since prompts is empty.
-    expect(textarea.placeholder).not.toMatch(/\/ for templates/);
+    // Plan 2026-05-19-001 — the slash hint persists even with no MCP
+    // prompts because <Chatbox> always injects the built-in `/clear`
+    // client command. The R10 silent-fallback contract still holds for
+    // the prompts list itself (no error panel below).
+    expect(textarea.placeholder).toMatch(/\/ for templates/);
   });
 
   it("keeps prompts empty when discoverPrompts rejects (R10 silent fallback)", async () => {
@@ -328,7 +331,8 @@ describe("Chatbox prompts discovery — R3 mount + change", () => {
     await act(async () => { await Promise.resolve(); });
 
     const textarea = container.querySelector("textarea");
-    expect(textarea.placeholder).not.toMatch(/\/ for templates/);
+    // Plan 2026-05-19-001 — hint still present via built-in `/clear`.
+    expect(textarea.placeholder).toMatch(/\/ for templates/);
     // The error panel must NOT render — discoverPrompts failures are
     // silent per R10.
     const alert = container.querySelector('[role="alert"]');

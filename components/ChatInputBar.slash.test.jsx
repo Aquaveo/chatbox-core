@@ -692,3 +692,155 @@ describe("ChatInputBar slash-command — regression", () => {
     expect(onSend).toHaveBeenCalledTimes(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Plan 2026-05-19-001 — clientCommands prop + /clear slash command
+// ---------------------------------------------------------------------------
+
+describe("ChatInputBar clientCommands — popover + dispatch", () => {
+  function makeClearCommand(execute = vi.fn()) {
+    return {
+      name: "/clear",
+      description: "Clear the conversation",
+      execute,
+    };
+  }
+
+  it("renders client commands in the popover alongside MCP prompts", () => {
+    const { container } = render(
+      <HostedInputBar
+        prompts={examplePrompts}
+        clientCommands={[makeClearCommand()]}
+      />,
+    );
+    typeInto(getTextarea(container), "/");
+    const rows = getRows();
+    // 3 MCP prompts + 1 client command = 4 rows.
+    expect(rows).toHaveLength(4);
+    // MCP prompts first, client commands after (preserves "/" + Enter
+    // selects first MCP prompt as default).
+    const names = rows.map((r) => r.textContent);
+    expect(names[0]).toMatch(/plot_timeseries/);
+    expect(names[3]).toMatch(/\/clear/);
+  });
+
+  it("fires execute() and bypasses onPromptSelected when a client command is selected via popover Enter", () => {
+    const execute = vi.fn();
+    const onPromptSelected = vi.fn(() => Promise.resolve());
+    const { container } = render(
+      <HostedInputBar
+        prompts={examplePrompts}
+        onPromptSelected={onPromptSelected}
+        clientCommands={[makeClearCommand(execute)]}
+      />,
+    );
+    const ta = getTextarea(container);
+    // Type `/c` so /clear is the only filtered item and highlighted by default.
+    typeInto(ta, "/c");
+    expect(getRows()).toHaveLength(1);
+    fireKey(ta, { key: "Enter" });
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(onPromptSelected).not.toHaveBeenCalled();
+  });
+
+  it("direct-type intercept: typing `/clear` + Enter with popover dismissed still fires execute", () => {
+    const execute = vi.fn();
+    const onSend = vi.fn();
+    const { container } = render(
+      <HostedInputBar
+        onSend={onSend}
+        clientCommands={[makeClearCommand(execute)]}
+      />,
+    );
+    const ta = getTextarea(container);
+    typeInto(ta, "/clear");
+    // Esc-dismiss the popover so the intercept path runs (popover-closed branch).
+    fireKey(ta, { key: "Escape" });
+    expect(getPopover()).toBeNull();
+    fireKey(ta, { key: "Enter" });
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("direct-type intercept is case-insensitive and trim-tolerant", () => {
+    const execute = vi.fn();
+    const onSend = vi.fn();
+    const { container } = render(
+      <HostedInputBar
+        onSend={onSend}
+        clientCommands={[makeClearCommand(execute)]}
+      />,
+    );
+    const ta = getTextarea(container);
+    typeInto(ta, "  /CLEAR  ");
+    // Whitespace + uppercase doesn't match the slash regex so popover stays closed.
+    expect(getPopover()).toBeNull();
+    fireKey(ta, { key: "Enter" });
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("does NOT intercept on prefix-only match (`/clearfoo` falls through to onSend)", () => {
+    const execute = vi.fn();
+    const onSend = vi.fn();
+    const { container } = render(
+      <HostedInputBar
+        onSend={onSend}
+        clientCommands={[makeClearCommand(execute)]}
+      />,
+    );
+    const ta = getTextarea(container);
+    typeInto(ta, "/clearfoo");
+    // `/clearfoo` does not match `/clear` exactly. Popover may be open
+    // with empty filter results (no client command starts with "clearfoo");
+    // Esc to ensure the closed-popover branch runs.
+    fireKey(ta, { key: "Escape" });
+    fireKey(ta, { key: "Enter" });
+    expect(execute).not.toHaveBeenCalled();
+    expect(onSend).toHaveBeenCalledTimes(1);
+  });
+
+  it("input is cleared after a client command fires (via setInput(''))", () => {
+    const execute = vi.fn();
+    const { container } = render(
+      <HostedInputBar clientCommands={[makeClearCommand(execute)]} />,
+    );
+    const ta = getTextarea(container);
+    typeInto(ta, "/clear");
+    fireKey(ta, { key: "Enter" });
+    expect(execute).toHaveBeenCalledTimes(1);
+    // Hosted input is controlled — after the command fires, setInput("") runs.
+    expect(ta.value).toBe("");
+  });
+
+  it("backward compat: no clientCommands prop → popover behavior unchanged", () => {
+    const onPromptSelected = vi.fn(() => Promise.resolve());
+    const { container } = render(
+      <HostedInputBar
+        prompts={examplePrompts}
+        onPromptSelected={onPromptSelected}
+      />,
+    );
+    typeInto(getTextarea(container), "/");
+    const rows = getRows();
+    // Only the 3 MCP prompts — no client commands injected.
+    expect(rows).toHaveLength(3);
+  });
+
+  it("popover open + Enter on a client command sticky-dismisses the token (popover stays closed for the same input)", () => {
+    const execute = vi.fn();
+    const { container } = render(
+      <HostedInputBar clientCommands={[makeClearCommand(execute)]} />,
+    );
+    const ta = getTextarea(container);
+    typeInto(ta, "/c");
+    expect(getPopover()).not.toBeNull();
+    fireKey(ta, { key: "Enter" });
+    expect(execute).toHaveBeenCalledTimes(1);
+    // The detection effect should not reopen the popover for the
+    // already-executed `/c` token — the input was cleared by setInput("")
+    // so the regex no longer matches anyway, but this also verifies the
+    // sticky-dismissal pattern fires per feedback_sticky_dismissal_pattern.
+    expect(getPopover()).toBeNull();
+  });
+});

@@ -227,6 +227,42 @@ describe("clearConversation(convId)", () => {
     // conv-b entry survives.
     expect(await readCachedPayload(b1)).toEqual(big);
   });
+
+  it("resolves on a populated conversation (cursor-walk + auto-commit race regression)", async () => {
+    // Real Chrome IDB auto-commits a transaction as soon as no more
+    // requests are pending. If `tx.oncomplete` is attached AFTER the
+    // cursor walk's inner Promise resolves (the pre-2026-05-19 bug),
+    // the event fires with no handler and the outer Promise hangs
+    // forever — `clearConversation` never returns. Symptom in
+    // production was 9 cache entries persisting after `/clear` with
+    // no visible error.
+    //
+    // Pin the contract: clearConversation MUST resolve within a
+    // reasonable bound even when the conversation has many entries
+    // (forcing the cursor walk to issue multiple deletes before the
+    // resolve() at cursor === null fires).
+    const big = { rows: Array.from({ length: 200 }, (_, i) => ({ i })) };
+    for (let i = 0; i < 5; i++) {
+      await cacheToolResult({
+        payload: { ...big, marker: i },
+        convId: "race-test",
+        sourceToolName: "t",
+      });
+    }
+    // Wrap in Promise.race with a timeout so a hung outer Promise
+    // surfaces as a test failure rather than silently passing.
+    await expect(
+      Promise.race([
+        clearConversation("race-test"),
+        new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error("clearConversation hung (>500ms)")),
+            500,
+          ),
+        ),
+      ]),
+    ).resolves.toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
