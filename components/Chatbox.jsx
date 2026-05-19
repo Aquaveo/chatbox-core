@@ -20,6 +20,7 @@ import styled, { ThemeProvider } from "styled-components";
 import chatTheme from "../theme/index.js";
 import { runChatSession, discoverPrompts, getPrompt } from "../engine/index.js";
 import { clearConversation } from "../engine/cache.js";
+import { createConnectionCache } from "../engine/connection-cache.js";
 import { createProbeScheduler } from "../engine/probe.js";
 import { validateServerUrl } from "../engine/transports.js";
 import { listModels } from "../helpers/index.js";
@@ -408,6 +409,21 @@ export default function Chatbox({
     return schedulerRef.current;
   }, []);
 
+  // Plan 2026-05-19-002 — per-mount MCP connection cache. Reuses one
+  // transport per server URL across discoverPrompts, runChatSession's
+  // listTools, executeTool, and getPrompt calls. Lazy-init mirrors
+  // `getScheduler` above (allocation skipped if no MCP work ever fires
+  // — rare but cheap to support). Cleanup runs on unmount + on
+  // allMcpServers URL-set change.
+  const cacheRef = useRef(null);
+  const discoverMemoRef = useRef({});
+  const getCache = useCallback(() => {
+    if (!cacheRef.current) {
+      cacheRef.current = createConnectionCache();
+    }
+    return cacheRef.current;
+  }, []);
+
   const handleAddMcpServer = useCallback((server) => {
     const result = addMcpServer(server);
     setUserMcpServers(result.servers);
@@ -482,6 +498,37 @@ export default function Chatbox({
   // transport closes don't outlive the component.
   useEffect(() => () => schedulerRef.current?.cancelAll(), []);
 
+  // Plan 2026-05-19-002 — close every cached MCP transport on unmount.
+  // The cache owns transport lifetime across turns; this is the only
+  // place that closes them. Best-effort (errors swallowed); the React
+  // unmount path also drops the ref so subsequent mounts get a fresh
+  // cache instance regardless.
+  useEffect(
+    () => () => {
+      cacheRef.current?.closeAll().catch(() => {
+        /* best effort */
+      });
+    },
+    [],
+  );
+
+  // Plan 2026-05-19-002 — when the user adds/removes/toggles an MCP
+  // server, close cached transports for URLs no longer in the active
+  // set. Surviving URLs keep their cached entries. Also invalidate the
+  // discoverPrompts memo so the next discovery rebuilds against the
+  // new URL set.
+  useEffect(() => {
+    if (!cacheRef.current) return;
+    const activeUrls = allMcpServers.map((s) => s?.url).filter(Boolean);
+    cacheRef.current.invalidateUrlsNotIn(activeUrls).catch(() => {
+      /* best effort */
+    });
+    // Discovery memo is keyed by sorted URL set; clearing forces the
+    // next discoverPrompts call to re-fetch (cached transports for
+    // surviving URLs still skip listPrompts via cache.getOrOpen).
+    discoverMemoRef.current = {};
+  }, [allMcpServers]);
+
   // Plan 2026-05-08-005 Unit 4 — mount-time + mcpServers-change prompt
   // discovery. Generation-counter race protection: each effect run bumps
   // `discoverGen.current`; on resolve we compare gen vs latest, dropping
@@ -489,7 +536,10 @@ export default function Chatbox({
   // the counter so an in-flight discover at unmount is ignored.
   useEffect(() => {
     const gen = ++discoverGen.current;
-    discoverPrompts(allMcpServers)
+    discoverPrompts(allMcpServers, {
+      cache: getCache(),
+      memo: discoverMemoRef.current,
+    })
       .then((result) => {
         if (gen !== discoverGen.current) return; // stale resolve
         // Flatten promptsByServer values into a single array; sort by
@@ -565,6 +615,7 @@ export default function Chatbox({
         prompt.name,
         synthArgs,
         allMcpServers,
+        { cache: getCache() },
       );
       setInput(text);
       setError("");
@@ -762,6 +813,10 @@ export default function Chatbox({
         // `enableResultCache` + `conversationId={dashboardUuid}` explicitly.
         enableResultCache,
         conversationId,
+        // Plan 2026-05-19-002 — per-mount MCP connection cache. One
+        // transport per server URL reused across turns + discovery +
+        // getPrompt. Lazy-init via getCache(); closeAll on unmount.
+        connectionCache: getCache(),
         // Inject domain-specific extensions (empty for generic sidebar)
         ...engineExtensions,
         onToolStatus: (status) => {
