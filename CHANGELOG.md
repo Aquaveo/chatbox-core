@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (pre-1.0: minor bumps may carry breaking changes during stabilization).
 
+## [Unreleased]
+
+## [0.8.0] — 2026-05-19
+
+### Added
+
+- **`/clear` slash command + `clientCommands` extension point.** Built-in `/clear` wipes the conversation context end-to-end: aborts any in-flight LLM request via the existing AbortController plumbing, empties the in-memory `messages` array, clears the IndexedDB conversation cache via `clearConversation(conversationId)`, and fires the new `onClear` host callback so the host can wipe its own persistence layer (e.g., localStorage chat history). Each step is best-effort; non-fatal errors log without rolling back already-cleared state.
+
+  New `<Chatbox>` props:
+  - `clientCommands: Array<{ name: string, description: string, execute: () => void | Promise<void> }>` — host can register additional `/<name>` commands that fire local callbacks instead of LLM dispatch. Items appear in the slash popover alongside MCP prompts.
+  - `onClear: () => void | Promise<void>` — fires after the engine wipe completes.
+
+  Built-in `/clear` is always available regardless of the `clientCommands` prop. Host entries named `/clear` override the built-in. MCP prompts are listed first in the popover so existing "type `/` + Enter selects first MCP prompt" behavior is preserved.
+
+  Direct-type intercept: typing `/clear` + Enter with the popover dismissed still fires execute (case-insensitive, trim-tolerant, exact match — `/clearfoo` falls through to LLM dispatch).
+
+### Fixed
+
+- **IndexedDB transaction auto-commit race in `engine/cache.js` `runTx`.** Previously `tx.oncomplete` was attached INSIDE the inner Promise's `.then(...)` callback, which can fire AFTER the IDB transaction has already auto-committed — leaving no handler attached and the outer Promise hanging forever. Observed in real Chrome 2026-05-19 against the cursor-walk path in `clearConversation`: `/clear` correctly wiped the in-memory messages but the IndexedDB entries persisted indefinitely. The same race existed silently on the write path (`store.put`); writes were small enough that the race window rarely opened, but the fix applies uniformly.
+
+  Fix attaches `tx.oncomplete` / `tx.onerror` / `tx.onabort` synchronously when the transaction is created, captures work's value into a closure, and resolves at oncomplete with the captured value. Inner-Promise rejections explicitly abort the transaction so half-committed state cannot masquerade as success.
+
+  Regression test added: `clearConversation` resolves within 500ms on a populated conversation (5 entries × 200 rows). Hung indefinitely under the old `runTx`.
+
 ## [0.7.0] — 2026-05-19
 
 ### Added
