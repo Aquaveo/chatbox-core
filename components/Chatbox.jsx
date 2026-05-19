@@ -256,6 +256,15 @@ export default function Chatbox({
   // `initialMessages` is read fresh from the new context.
   initialMessages = [],
   onMessagesChange,
+  // Plan 2026-05-18-002 — MCP result-by-reference protocol opt-in.
+  // Default false so npm consumers of @aquaveo/chatbox-core that don't
+  // know about the feature inherit no behavior change. tethysapp-tethys_dash
+  // sets `enableResultCache={true}` + `conversationId={dashboardUuid}` on
+  // its <ChatSidebar> mount. When enabled, oversized tool results are
+  // cached in IndexedDB and the LLM receives `_cache_uri` markers it can
+  // pass forward as `*_uri` args to subsequent tool calls.
+  enableResultCache = false,
+  conversationId = "default",
 }) {
   const isEmbedded = typeof updateVariableInputValues === "function";
   const [messages, setMessages] = useState(initialMessages);
@@ -672,6 +681,12 @@ export default function Chatbox({
         providerConfig,
         ...(csrfToken ? { csrfToken } : {}),
         mcpServers: allMcpServers,
+        // Plan 2026-05-18-002 — MCP result-by-reference protocol opt-in.
+        // Both props default off so npm consumers that don't pass them
+        // inherit no behavior change. tethysapp-tethys_dash sets
+        // `enableResultCache` + `conversationId={dashboardUuid}` explicitly.
+        enableResultCache,
+        conversationId,
         // Inject domain-specific extensions (empty for generic sidebar)
         ...engineExtensions,
         onToolStatus: (status) => {
@@ -971,7 +986,7 @@ export default function Chatbox({
       setThinkingBuffer("");
       setContentBuffer("");
     }
-  }, [input, loading, selectedModel, isThinkingEnabled, contextUsage.total, providerConfig, csrfToken, allMcpServers, isEmbedded, updateVariableInputValues, engineExtensions, onResult, resolveVisualizationUrl]);
+  }, [input, loading, selectedModel, isThinkingEnabled, contextUsage.total, providerConfig, csrfToken, allMcpServers, isEmbedded, updateVariableInputValues, engineExtensions, onResult, resolveVisualizationUrl, enableResultCache, conversationId]);
 
   const hasMessages = messages.length > 0 || loading;
 
