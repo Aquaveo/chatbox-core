@@ -19,6 +19,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import styled, { ThemeProvider } from "styled-components";
 import chatTheme from "../theme/index.js";
 import { runChatSession, discoverPrompts, getPrompt } from "../engine/index.js";
+import { clearConversation } from "../engine/cache.js";
 import { createProbeScheduler } from "../engine/probe.js";
 import { validateServerUrl } from "../engine/transports.js";
 import { listModels } from "../helpers/index.js";
@@ -265,6 +266,18 @@ export default function Chatbox({
   // pass forward as `*_uri` args to subsequent tool calls.
   enableResultCache = false,
   conversationId = "default",
+  // Plan 2026-05-19-001 — client-side slash commands. Host can register
+  // additional `/<name>` commands that fire local callbacks instead of
+  // LLM dispatch (e.g., `/undo`, `/export`). The built-in `/clear` is
+  // always available regardless of this prop. Items must shape as
+  // `{ name: "/something", description: string, execute: () => void | Promise<void> }`.
+  // Host entries take precedence over the built-in when names collide.
+  clientCommands = [],
+  // Plan 2026-05-19-001 — fires AFTER the engine has aborted any
+  // in-flight request, wiped the messages array, and cleared the
+  // IndexedDB conversation cache. Host uses this hook to wipe its own
+  // persistence layer (e.g., localStorage chat history).
+  onClear,
 }) {
   const isEmbedded = typeof updateVariableInputValues === "function";
   const [messages, setMessages] = useState(initialMessages);
@@ -578,6 +591,68 @@ export default function Chatbox({
   const turnIdRef = useRef(0);
 
   const stopGeneration = useCallback(() => { abortRef.current?.abort(); }, []);
+
+  // Plan 2026-05-19-001 — `/clear` orchestration. Wipes the conversation
+  // context end-to-end: aborts any in-flight LLM request, empties the
+  // in-memory messages array, clears the IndexedDB conversation cache,
+  // then invokes the host's onClear callback so it can wipe its own
+  // persistence (e.g., localStorage). Each step is best-effort; a
+  // failure in cache/IndexedDB does not block the rest.
+  const handleClear = useCallback(async () => {
+    // 1. Cancel in-flight engine work. Safe to call even when nothing
+    //    is in-flight — abortRef may be null on first turn.
+    abortRef.current?.abort();
+    // 2. Wipe in-memory React state. The engine's history ref (seeded
+    //    from initialMessages on mount) is not reset here — the next
+    //    turn will rebuild it from the now-empty `messages` state via
+    //    the existing engineMessagesRef sync effect.
+    setMessages([]);
+    setError("");
+    setThinkingBuffer("");
+    setContentBuffer("");
+    setToolStatus(null);
+    // 3. Clear IndexedDB conversation cache. Non-fatal on error so the
+    //    rest of the clear still completes.
+    try {
+      await clearConversation(conversationId || "default");
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.info("[chatbox-core] /clear: clearConversation error (non-fatal):", err);
+    }
+    // 4. Fire host onClear so it can wipe its own persistence. Wrapped
+    //    so a host-side throw doesn't roll back the already-cleared
+    //    engine state.
+    if (typeof onClear === "function") {
+      try {
+        await onClear();
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error("[chatbox-core] /clear: onClear callback threw:", err);
+      }
+    }
+  }, [conversationId, onClear]);
+
+  // Plan 2026-05-19-001 — built-in `/clear` slash command. Always
+  // available regardless of the host's `clientCommands` prop. A host
+  // entry named "/clear" overrides this default (host-precedence merge).
+  const mergedClientCommands = useMemo(() => {
+    const list = Array.isArray(clientCommands) ? [...clientCommands] : [];
+    const hasClear = list.some(
+      (c) =>
+        c &&
+        typeof c.name === "string" &&
+        c.name.toLowerCase() === "/clear",
+    );
+    if (!hasClear) {
+      list.push({
+        name: "/clear",
+        description:
+          "Clear the conversation (wipes messages, cache, and persisted state)",
+        execute: handleClear,
+      });
+    }
+    return list;
+  }, [clientCommands, handleClear]);
 
   // Auto-scroll
   useEffect(() => {
@@ -1011,6 +1086,7 @@ export default function Chatbox({
       providerConfig={providerConfig}
       prompts={prompts}
       onPromptSelected={handlePromptSelected}
+      clientCommands={mergedClientCommands}
     />
   );
 

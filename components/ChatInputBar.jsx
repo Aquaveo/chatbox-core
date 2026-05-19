@@ -1,4 +1,4 @@
-import { useRef, useCallback, useEffect, useState, useLayoutEffect, useId } from "react";
+import { useRef, useCallback, useEffect, useMemo, useState, useLayoutEffect, useId } from "react";
 import ReactDOM from "react-dom";
 import styled, { keyframes } from "styled-components";
 import ContextUsageIndicator from "./ContextUsageIndicator";
@@ -375,6 +375,14 @@ export default function ChatInputBar({
   providerConfig,
   prompts = [],
   onPromptSelected = () => Promise.resolve(),
+  // Plan 2026-05-19-001 — client-side slash commands. Each entry shapes
+  // as `{ name: "/something", description: string, execute: fn }`. They
+  // appear in the slash popover alongside MCP prompts; differentiation
+  // is internal (selection routes to `execute()` instead of
+  // `onPromptSelected`). Built-in `/clear` is injected by <Chatbox> when
+  // used through that wrapper; standalone ChatInputBar consumers pass
+  // their own list (or [] for prompts-only behavior).
+  clientCommands = [],
 }) {
   const textareaRef = useRef(null);
 
@@ -407,16 +415,40 @@ export default function ChatInputBar({
   // outer-page scrolls that should dismiss it.
   const popoverWrapRef = useRef(null);
 
-  const promptsAvailable = prompts.length > 0;
+  // Plan 2026-05-19-001 — merge MCP prompts BEFORE client commands so
+  // the unfiltered popover (user typed just `/`) highlights the first
+  // MCP prompt as the default Enter target. Client commands surface
+  // when the user types enough of their name to filter down (e.g., `/c`
+  // narrows to `/clear`). Order matters only for the empty-token case;
+  // prefix-filtering applies the same to all items.
+  const slashItems = useMemo(
+    () => [
+      ...(Array.isArray(prompts) ? prompts : []),
+      ...(Array.isArray(clientCommands) ? clientCommands : []),
+    ],
+    [clientCommands, prompts],
+  );
+  const promptsAvailable = slashItems.length > 0;
 
-  // Case-insensitive prefix-match against prompt.name.
+  // Case-insensitive prefix-match against item.name. `filteredPrompts`
+  // keeps its historical name so downstream popover-render code does not
+  // need to change; items may be either MCP prompts or client commands —
+  // selection dispatches on whether the item carries an `execute` fn.
+  // MCP prompt names are bare (e.g., "plot_timeseries"); client command
+  // names carry the leading `/` (e.g., "/clear"). The trigger token is
+  // always the user-typed text AFTER the leading `/`. Normalize both
+  // sides by stripping any leading `/` from the item name before
+  // comparing, so "/clear" matches token "c".
   const filteredPrompts = (() => {
     if (!popoverOpen) return [];
     const tok = triggerToken.toLowerCase();
-    if (!tok) return prompts;
-    return prompts.filter((p) =>
-      typeof p?.name === "string" && p.name.toLowerCase().startsWith(tok),
-    );
+    if (!tok) return slashItems;
+    return slashItems.filter((p) => {
+      if (typeof p?.name !== "string") return false;
+      const lower = p.name.toLowerCase();
+      const normalized = lower.startsWith("/") ? lower.slice(1) : lower;
+      return normalized.startsWith(tok);
+    });
   })();
 
   // R5 — initial render & live edits. Evaluating the regex on every
@@ -562,6 +594,36 @@ export default function ChatInputBar({
   const selectPrompt = useCallback(
     (prompt) => {
       if (!prompt) return;
+      // Plan 2026-05-19-001 — client-command branch. Items carrying an
+      // `execute` function fire locally (no LLM dispatch, no MCP prompt
+      // resolution). Sticky-dismiss the token and close popover so the
+      // detection effect doesn't reopen against the same input. Errors
+      // surface to the console (consistent with the MCP-prompt failure
+      // path which clears state and lets ChatErrorPanel display upstream
+      // errors); we deliberately do NOT bubble execute() rejections up
+      // because client commands are host-owned side effects.
+      if (typeof prompt.execute === "function") {
+        const tokenAtSelect = triggerToken;
+        new Promise((resolve, reject) => {
+          try {
+            resolve(prompt.execute());
+          } catch (err) {
+            reject(err);
+          }
+        }).catch((err) => {
+          // eslint-disable-next-line no-console
+          console.error(
+            `[chatbox-core] client command '${prompt.name}' threw:`,
+            err,
+          );
+        });
+        // Clear the input that triggered the popover (typically `/clear`)
+        // so the textarea is empty after the command fires.
+        setInput("");
+        dismissedTokenRef.current = tokenAtSelect;
+        setPopoverOpen(false);
+        return;
+      }
       const gen = ++selectionGen.current;
       const tokenAtSelect = triggerToken;
       setLoadingPromptName(prompt.name);
@@ -610,7 +672,7 @@ export default function ChatInputBar({
           },
         );
     },
-    [onPromptSelected, popoverOpen, triggerToken],
+    [onPromptSelected, popoverOpen, triggerToken, setInput],
   );
 
   const handleKeyDown = useCallback(
@@ -648,10 +710,29 @@ export default function ChatInputBar({
       // Default behavior when popover is closed (or no matches).
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
+        // Plan 2026-05-19-001 — direct-type intercept. If the trimmed
+        // input exactly matches a client-command name (case-insensitive),
+        // route to its `execute()` instead of dispatching to the LLM.
+        // Covers the popover-dismissed path (user Esc'd or popover never
+        // opened for any reason) so `/clear` + Enter is reliable.
+        const trimmed = input.trim().toLowerCase();
+        if (trimmed.startsWith("/") && Array.isArray(clientCommands)) {
+          const match = clientCommands.find(
+            (c) =>
+              c &&
+              typeof c.name === "string" &&
+              c.name.toLowerCase() === trimmed &&
+              typeof c.execute === "function",
+          );
+          if (match) {
+            selectPrompt(match);
+            return;
+          }
+        }
         onSend();
       }
     },
-    [onSend, popoverOpen, filteredPrompts, highlightedIndex, selectPrompt, triggerToken],
+    [onSend, popoverOpen, filteredPrompts, highlightedIndex, selectPrompt, triggerToken, input, clientCommands],
   );
 
   const handleInput = useCallback(
