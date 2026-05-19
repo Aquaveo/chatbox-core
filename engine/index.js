@@ -29,6 +29,7 @@ import {
 } from "./transports.js";
 import { ERROR_KEYS } from "./mcpErrors.js";
 import { cacheToolResult } from "./cache.js";
+import { substituteCacheUris } from "./uri-substitution.js";
 import { trimConversation } from "../conversation/index.js";
 import { buildGenericSystemMessage } from "../messages/index.js";
 import {
@@ -742,6 +743,41 @@ export async function processToolCalls(
       }
       if (preResult?.args) args = preResult.args;
       if (preResult?.toolName) toolName = preResult.toolName;
+    }
+
+    // Plan 2026-05-18-002 Unit 3 — substitute `*_uri` args against the
+    // IndexedDB cache BEFORE the existing UUID-placeholder walk. The two
+    // layers cover different patterns: this one is open-vocabulary
+    // (any arg ending in `_uri`); the next one is closed-vocabulary
+    // (the 5 enumerated `{{last_<type>_uuid}}` tokens). Ordering is
+    // explicit so a future tool whose URI value happens to match a
+    // placeholder shape gets resolved as URI first.
+    if (cacheOptions?.enabled && args && typeof args === "object") {
+      const subResult = await substituteCacheUris(args);
+      if (!subResult.ok) {
+        // Cache miss — short-circuit dispatch and push the envelope as
+        // the tool result. The LLM gets an `invalid_args`-shaped error
+        // with `_missing_uris` + a fix_hint directing it to re-call the
+        // source tool. Mirrors the input-validation middleware recovery
+        // pattern; LLMs already know how to interpret these envelopes.
+        const missEnvelope = subResult.envelope;
+        fireStatus({ type: "tool_start", toolName });
+        fireStatus({ type: "tool_complete", toolName, success: false });
+        messages.push({
+          role: "tool",
+          tool_call_id: toolCall.id || toolName,
+          tool_name: toolName,
+          content: JSON.stringify({
+            ...missEnvelope,
+            _engine_dispatched: [],
+          }),
+        });
+        hadError = true;
+        lastErr = new Error(missEnvelope.error);
+        failedSignatures.push(`${toolName}|cache-miss|${JSON.stringify(missEnvelope._missing_uris)}`);
+        continue;
+      }
+      args = subResult.args;
     }
 
     // Plan 2026-05-07-002 Unit B: substitute `{{last_<type>_uuid}}`
