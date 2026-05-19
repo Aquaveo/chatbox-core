@@ -28,6 +28,7 @@ import {
   LIST_TOOLS_BUDGET_MS,
 } from "./transports.js";
 import { ERROR_KEYS } from "./mcpErrors.js";
+import { cacheToolResult } from "./cache.js";
 import { trimConversation } from "../conversation/index.js";
 import { buildGenericSystemMessage } from "../messages/index.js";
 import {
@@ -689,7 +690,14 @@ function _substituteLastUuidPlaceholders(value, lastReturnedUuids) {
 
 export async function processToolCalls(
   toolCalls, messages, connections, toolServerMap, state, originalUserText,
-  { toolCategories, beforeToolExecution, toolErrorCheck, afterToolExecution, onToolStatus },
+  {
+    toolCategories, beforeToolExecution, toolErrorCheck, afterToolExecution, onToolStatus,
+    // MCP result-by-reference protocol (plan 2026-05-18-002). Disabled by
+    // default so npm consumers of @aquaveo/chatbox-core that don't opt in
+    // see no behavior change. tethysapp-tethys_dash sets enabled=true on
+    // its <ChatSidebar> mount via Unit 4's host prop.
+    cacheOptions = { enabled: false, conversationId: "default" },
+  },
 ) {
   let hadError = false;
   let lastErr = null;
@@ -880,6 +888,27 @@ export async function processToolCalls(
       // the engine's authoritative value last (object-key insertion order
       // makes the engine's value win even on engines that surface dupes).
       resultForLlm = { ...toolResult, _engine_dispatched: dispatchedUuids };
+
+      // Plan 2026-05-18-002 Unit 2 — MCP result-by-reference protocol.
+      // When enabled by the host (Chatbox.jsx's `enableResultCache` prop,
+      // threaded through Unit 4), oversized tool results are auto-cached
+      // in IndexedDB and a `_cache_uri` marker is injected into the
+      // LLM-visible envelope. Unit 3's substitution layer (in this same
+      // function above the dispatch call) resolves the URI back to inline
+      // data when the LLM passes it forward as `data_uri` or any other
+      // `*_uri` arg. The cache write happens BEFORE the truncation pass
+      // below so the cached payload is always the ORIGINAL, not the
+      // truncated summary the LLM ends up seeing for oversized results.
+      if (cacheOptions?.enabled) {
+        const cacheUri = await cacheToolResult({
+          payload: toolResult,
+          convId: cacheOptions.conversationId || "default",
+          sourceToolName: toolName,
+        });
+        if (cacheUri) {
+          resultForLlm._cache_uri = cacheUri;
+        }
+      }
     }
 
     // Truncate large results before storing in conversation history.
@@ -965,6 +994,15 @@ export async function processToolCalls(
         summary._engine_dispatched = dispatchedUuids;
         summary._truncated = true;
         summary._originalChars = originalLen;
+        // Plan 2026-05-18-002 Unit 2 — preserve `_cache_uri` into the
+        // truncation summary so the LLM still receives the reference
+        // even when the bulk payload was dropped. This is exactly the
+        // case where the LLM most needs the cache URI (data was too
+        // large to fit in the per-tool-result cap; ref-by-URI is the
+        // only viable way to pass it forward).
+        if (resultForLlm._cache_uri) {
+          summary._cache_uri = resultForLlm._cache_uri;
+        }
         resultContent = JSON.stringify(summary);
       } else {
         // K1 — non-object results never gain `_engine_dispatched`; keep
@@ -1043,7 +1081,16 @@ export async function runChatSession({
   repairMessageBuilder = null,
   beforeFirstMessage = null,
   afterToolExecution = null,
+
+  // MCP result-by-reference protocol (plan 2026-05-18-002). Default off
+  // so npm consumers of @aquaveo/chatbox-core that don't opt in inherit
+  // no behavior change. tethysapp-tethys_dash's <ChatSidebar> sets these
+  // explicitly via Unit 4's host prop.
+  enableResultCache = false,
+  conversationId = "default",
 }) {
+  const cacheOptions = { enabled: !!enableResultCache, conversationId };
+
   const state = {
     lastChartResult: null,
     lastQueryResult: null,
@@ -1240,7 +1287,10 @@ export async function runChatSession({
       // with per-tool start/complete events fired from inside processToolCalls.
       let { hadError, lastErr, failedSignatures } = await processToolCalls(
         toolCalls, messages, connections, toolServerMap, state, text,
-        { toolCategories, beforeToolExecution, toolErrorCheck, afterToolExecution, onToolStatus },
+        {
+          toolCategories, beforeToolExecution, toolErrorCheck, afterToolExecution, onToolStatus,
+          cacheOptions,
+        },
       );
 
       // Extension point: early return for terminal results
@@ -1359,7 +1409,10 @@ export async function runChatSession({
           // processToolCalls; no per-round toggle needed here.
           ({ hadError, lastErr, failedSignatures } = await processToolCalls(
             repairCalls, messages, connections, toolServerMap, state, text,
-            { toolCategories, beforeToolExecution, toolErrorCheck, afterToolExecution, onToolStatus },
+            {
+              toolCategories, beforeToolExecution, toolErrorCheck, afterToolExecution, onToolStatus,
+              cacheOptions,
+            },
           ));
 
           for (const sig of failedSignatures) {
