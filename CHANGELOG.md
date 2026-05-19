@@ -8,6 +8,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **MCP result-by-reference protocol (Units 1-4).** New `<Chatbox
+  enableResultCache>` opt-in adds an IndexedDB-backed cache for
+  oversized tool results plus a substitution layer in `processToolCalls`
+  that resolves `*_uri` args to inline data before dispatch. Eliminates
+  the LLM transcription bottleneck observed in production 2026-05-18
+  where a 240-row time-series array took ~127s of LLM output tokens to
+  regenerate between two MCP servers.
+
+  - **Auto-cache heuristic:** tool results whose serialized size
+    exceeds `MAX_TOOL_RESULT_CHARS` (4 KB, matching v0.6.4's truncation
+    cap) are written to IndexedDB keyed by an
+    `mcp+cache://<conv-id>/<8-byte-base64url>` URI. The URI is surfaced
+    to the LLM as `_cache_uri` on the tool result envelope.
+  - **Substitution at dispatch:** when a subsequent tool call has any
+    arg ending in `_uri` whose value matches the `mcp+cache://` scheme,
+    chatbox-core looks up the cached payload and substitutes it into
+    the corresponding non-`_uri` arg before dispatching. The receiving
+    server tool sees inline data — no MCP wire-contract change needed.
+  - **Array URIs supported:** `layers_uri: [u1, u2, u3]` resolves each
+    URI and substitutes `layers: [p1, p2, p3]`.
+  - **Conflict resolution:** if the LLM passes BOTH `data` and
+    `data_uri`, URI wins, inline dropped, console.info logged.
+  - **Cache miss:** returns `invalid_args` envelope with `_missing_uris`
+    + `fix_hint`; tool dispatch short-circuits. No auto-retry in v1.
+  - **Per-mount opt-in:** `<Chatbox enableResultCache={false}>` default
+    so npm consumers that don't opt in inherit zero behavior change.
+  - **Truncation-summary preservation:** when the bulk payload was
+    dropped by v0.6.4's truncation pass, the `_cache_uri` is still
+    surfaced in the summary so the LLM has the reference even when
+    the data was too large to fit in the per-tool-result cap.
+
+  New host props on `<Chatbox>`:
+  - `enableResultCache: boolean` (default `false`)
+  - `conversationId: string` (default `"default"`) — used as the conv-id
+    segment of minted URIs and as the scope for `clearConversation`
+    (host calls this on dashboard switch / chat reset).
+
+  New engine surface in `engine/cache.js`:
+  - `cacheToolResult({payload, convId, sourceToolName, threshold})`
+  - `readCachedPayload(uri)`
+  - `clearConversation(convId)`
+  - `evictOlderThan({maxAgeMs})`
+  - `mintCacheUri(convId)`, `estimateSize(payload)`, `hasIndexedDB()`
+
+  Plan: `docs/plans/2026-05-18-002-feat-mcp-result-by-reference-protocol-plan.md`
+  in the firoh workspace.
+
+  Companion: receiving side ships in
+  `Aquaveo/tethysdash_mcps` PR #7 — `data_uri` opt-in on
+  `create_plotly_chart`, `create_data_table`, `create_card`.
+
+  Suite: 463 → 495 passed (+32 new tests across `engine/cache.test.js`,
+  `engine/cache-instrumentation.test.js`, `engine/uri-substitution.test.js`).
+
 ### Removed (BREAKING — pre-1.0 acceptable)
 
 - **`resolveModelCapability` from `engine/index.js`** and the entire
