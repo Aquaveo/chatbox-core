@@ -242,26 +242,53 @@ function runTx(db, mode, work) {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, mode);
     const store = tx.objectStore(STORE_NAME);
+
+    // IndexedDB auto-commits a transaction as soon as no more requests are
+    // pending. `tx.oncomplete` / `tx.onerror` / `tx.onabort` MUST be
+    // attached synchronously, before `work(store)` schedules any
+    // requests — otherwise the events can fire and dispatch with no
+    // handlers attached, and the outer Promise hangs forever. Observed in
+    // real Chrome 2026-05-19 against the cursor-walk path in
+    // clearConversation (fake-indexeddb's looser timing masked the race
+    // in unit tests).
+    let workResult;
+    tx.oncomplete = () => resolve(workResult);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error("IDB transaction aborted"));
+
     const result = work(store);
-    // Result may be a request (e.g., store.get) or a Promise (for cursor
-    // walks). Handle both shapes.
+
+    // Result may be:
+    //   - a Promise (cursor walks resolve when cursor === null)
+    //   - an IDBRequest (e.g., store.get / store.put — has `.onsuccess`)
+    //   - a scalar (rare; the work fn did all its bookkeeping internally)
+    // In all three cases we attach handlers that capture work's value
+    // into `workResult`, so the tx.oncomplete handler above resolves
+    // with it when the transaction commits.
     if (result && typeof result.then === "function") {
       result.then(
         (value) => {
-          tx.oncomplete = () => resolve(value);
-          tx.onerror = () => reject(tx.error);
+          workResult = value;
         },
-        reject,
+        (err) => {
+          // Inner Promise rejected → abort the transaction so its
+          // oncomplete doesn't masquerade as success. The tx.onabort
+          // handler above will surface the original error via reject.
+          try {
+            tx.abort();
+          } catch (_e) {
+            /* tx may already be finishing — ignore */
+          }
+          reject(err);
+        },
       );
     } else if (result && typeof result.onsuccess !== "undefined") {
       result.onsuccess = () => {
-        tx.oncomplete = () => resolve(result.result);
-        tx.onerror = () => reject(tx.error);
+        workResult = result.result;
       };
       result.onerror = () => reject(result.error);
     } else {
-      tx.oncomplete = () => resolve(result);
-      tx.onerror = () => reject(tx.error);
+      workResult = result;
     }
   });
 }
