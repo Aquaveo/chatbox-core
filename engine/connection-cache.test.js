@@ -150,6 +150,41 @@ describe("createConnectionCache — getOrOpen", () => {
     const entry = await cache.getOrOpen("urlA");
     expect(entry.conn).toBe(conn2);
   });
+
+  it("attaches _cachePhase='transport' to errors thrown by pickTransportWithRetry", async () => {
+    const err = new Error("connect failed");
+    err.errorKey = "connection-failed";
+    pickTransportWithRetry.mockRejectedValueOnce(err);
+
+    const cache = createConnectionCache();
+    let caught;
+    try {
+      await cache.getOrOpen("urlA");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBe(err);
+    expect(caught._cachePhase).toBe("transport");
+    // Pre-existing errorKey preserved — phase is additive.
+    expect(caught.errorKey).toBe("connection-failed");
+  });
+
+  it("attaches _cachePhase='list_tools' to errors thrown by listTools", async () => {
+    const conn = makeFakeConnection();
+    const listErr = new Error("not an MCP server");
+    conn.client.listTools = vi.fn(() => Promise.reject(listErr));
+    pickTransportWithRetry.mockResolvedValueOnce(conn);
+
+    const cache = createConnectionCache();
+    let caught;
+    try {
+      await cache.getOrOpen("urlA");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBe(listErr);
+    expect(caught._cachePhase).toBe("list_tools");
+  });
 });
 
 describe("createConnectionCache — invalidate", () => {

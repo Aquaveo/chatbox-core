@@ -43,7 +43,12 @@
  *     Out of scope per the plan's non-goals.
  */
 
-import { pickTransportWithRetry, closeMcpConnection } from "./transports.js";
+import {
+  pickTransportWithRetry,
+  closeMcpConnection,
+  withTimeout,
+  LIST_TOOLS_BUDGET_MS,
+} from "./transports.js";
 
 /**
  * Create a fresh connection cache.
@@ -90,15 +95,32 @@ export function createConnectionCache() {
   }
 
   async function openAndStore(url) {
-    const conn = await pickTransportWithRetry(url);
+    let conn;
+    try {
+      conn = await pickTransportWithRetry(url);
+    } catch (err) {
+      // Mark phase so connectMcpServers can preserve its existing
+      // errorKey mapping (connectionFailed vs notMcpServer). pickTransport
+      // already attaches `errorKey`; we just add the phase marker.
+      if (err && typeof err === "object" && !err._cachePhase) {
+        err._cachePhase = "transport";
+      }
+      throw err;
+    }
     let tools;
     try {
-      const response = await conn.client.listTools();
+      const response = await withTimeout(
+        conn.client.listTools(),
+        LIST_TOOLS_BUDGET_MS,
+      );
       tools = Array.isArray(response?.tools) ? response.tools : [];
     } catch (err) {
       // The transport is open but listTools failed. Close to avoid a
       // socket leak before propagating.
       await closeMcpConnection(conn);
+      if (err && typeof err === "object" && !err._cachePhase) {
+        err._cachePhase = "list_tools";
+      }
       throw err;
     }
     const entry = { conn, tools };
