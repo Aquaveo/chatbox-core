@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Pre-dispatch inline-list cap on tool args paired with a `*_uri` alternative.** When the LLM emits an inline `data` array over `INLINE_LIST_MAX_RECORDS` (default 20) AND does not set the corresponding `data_uri` companion, the engine short-circuits the dispatch with an actionable error envelope naming `data_uri` and `_cache_uri` as the recovery path. Targets the LLM's emission, not the resolved payload: cache-URI-substituted calls of any size pass through unaffected. Fixes the small-model failure mode where nemotron-3-nano-30b reliably produced JSON parse errors around the 1KB threshold (e.g., `Extra data: line 1 column 1275`) on a 24-record inline data array, causing repair-loop oscillation that took 200+ seconds before the user cancelled. Scope is convention-based on arg name (`data` today); future cappable args can be added to the `CAPPED_INLINE_ARGS` set.
+
 ## [0.11.0] — 2026-05-19
 
 ### Added

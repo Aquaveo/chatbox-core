@@ -24,7 +24,11 @@ import {
   cacheToolResult,
   CACHE_URI_SCHEME,
 } from "./cache.js";
-import { substituteCacheUris } from "./uri-substitution.js";
+import {
+  substituteCacheUris,
+  checkInlineListCap,
+  INLINE_LIST_MAX_RECORDS,
+} from "./uri-substitution.js";
 import { makeFakeClient } from "../test-helpers/fakeConn.js";
 
 // ---------------------------------------------------------------------------
@@ -299,5 +303,252 @@ describe("processToolCalls — Unit 3 substitution integration", () => {
 
     // Tool received the URI verbatim — no substitution.
     expect(receivedArgs.value).toEqual({ data_uri: "mcp+cache://x/y" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// checkInlineListCap — direct unit tests
+// ---------------------------------------------------------------------------
+
+describe("checkInlineListCap(toolName, args)", () => {
+  function makeRecords(n) {
+    return Array.from({ length: n }, (_, i) => ({
+      time: `2026-05-18T${String(i).padStart(2, "0")}:00:00Z`,
+      flow: i * 1.1,
+    }));
+  }
+
+  it("returns null when no capped arg is present", () => {
+    expect(checkInlineListCap("create_plotly_chart", {})).toBeNull();
+    expect(
+      checkInlineListCap("create_plotly_chart", { layout: { title: "x" } }),
+    ).toBeNull();
+  });
+
+  it("returns null when `data` is a list at or under the cap", () => {
+    expect(
+      checkInlineListCap("create_plotly_chart", {
+        data: makeRecords(INLINE_LIST_MAX_RECORDS),
+      }),
+    ).toBeNull();
+    expect(
+      checkInlineListCap("create_plotly_chart", { data: makeRecords(1) }),
+    ).toBeNull();
+  });
+
+  it("returns null when `data` is not a list (e.g., a string for json-decode coercion)", () => {
+    // Strings flow through to the server's json.loads path; the cap
+    // here targets LLM-emitted structured arrays, not pre-stringified
+    // payloads. Server-side validation handles malformed strings.
+    expect(
+      checkInlineListCap("create_plotly_chart", {
+        data: JSON.stringify(makeRecords(50)),
+      }),
+    ).toBeNull();
+  });
+
+  it("returns an envelope when `data` exceeds the cap AND `data_uri` is not set", () => {
+    const env = checkInlineListCap("create_plotly_chart", {
+      data: makeRecords(24),
+    });
+    expect(env).not.toBeNull();
+    expect(env.error).toMatch(/24 records/);
+    expect(env.error).toMatch(/cap: 20/);
+    expect(env.error).toMatch(/data_uri/);
+    expect(env.fix_hint).toMatch(/create_plotly_chart/);
+    expect(env.fix_hint).toMatch(/data_uri=/);
+    expect(env._capped_arg).toBe("data");
+  });
+
+  it("skips the cap when the LLM also set `data_uri` (URI path wins via conflict resolution)", () => {
+    expect(
+      checkInlineListCap("create_plotly_chart", {
+        data: makeRecords(50),
+        data_uri: "mcp+cache://x/y",
+      }),
+    ).toBeNull();
+  });
+
+  it("honors a custom cap argument (tunable threshold)", () => {
+    const env = checkInlineListCap(
+      "create_data_table",
+      { data: makeRecords(10) },
+      5,
+    );
+    expect(env).not.toBeNull();
+    expect(env.error).toMatch(/10 records/);
+    expect(env.error).toMatch(/cap: 5/);
+  });
+
+  it("returns null for non-object / array args defensively", () => {
+    expect(checkInlineListCap("foo", null)).toBeNull();
+    expect(checkInlineListCap("foo", undefined)).toBeNull();
+    expect(checkInlineListCap("foo", "string")).toBeNull();
+    expect(checkInlineListCap("foo", [1, 2, 3])).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Integration: processToolCalls end-to-end with inline-list cap
+// ---------------------------------------------------------------------------
+
+describe("processToolCalls — inline-list cap integration", () => {
+  function makeRecords(n) {
+    return Array.from({ length: n }, (_, i) => ({
+      time: `2026-05-18T${String(i).padStart(2, "0")}:00:00Z`,
+      flow: i * 1.1,
+    }));
+  }
+
+  it("over-cap inline data short-circuits dispatch with an actionable envelope", async () => {
+    const callTool = vi.fn(); // must NOT be called
+    const client = makeFakeClient({ callToolImpl: callTool });
+    const connections = [{ client, transport: null, protocolUsed: "http" }];
+    const toolServerMap = new Map([["create_plotly_chart", 0]]);
+    const messages = [];
+
+    await processToolCalls(
+      [makeToolCall("create_plotly_chart", { data: makeRecords(24) })],
+      messages,
+      connections,
+      toolServerMap,
+      makeFreshState(),
+      "",
+      {
+        cacheOptions: { enabled: true, conversationId: "conv-cap" },
+      },
+    );
+
+    // Tool body was NOT dispatched — the cap short-circuited locally.
+    expect(callTool).not.toHaveBeenCalled();
+
+    // The LLM-visible tool message carries the actionable envelope.
+    const toolMsg = messages.find((m) => m.role === "tool");
+    expect(toolMsg).toBeDefined();
+    const parsed = JSON.parse(toolMsg.content);
+    expect(parsed.error).toMatch(/data.*24 records/);
+    expect(parsed.error).toMatch(/data_uri/);
+    expect(parsed.fix_hint).toMatch(/data_uri=/);
+    expect(parsed._capped_arg).toBe("data");
+    expect(parsed._engine_dispatched).toEqual([]);
+  });
+
+  it("under-cap inline data dispatches normally", async () => {
+    const receivedArgs = { value: null };
+    const callTool = vi.fn(async ({ arguments: args }) => {
+      receivedArgs.value = args;
+      return {
+        data: {
+          visualization: {
+            uuid: "viz-1",
+            source: "Inline Plotly",
+            vizType: "plotly",
+          },
+        },
+      };
+    });
+    const client = makeFakeClient({ callToolImpl: callTool });
+    const connections = [{ client, transport: null, protocolUsed: "http" }];
+    const toolServerMap = new Map([["create_plotly_chart", 0]]);
+    const messages = [];
+
+    await processToolCalls(
+      [makeToolCall("create_plotly_chart", { data: makeRecords(15) })],
+      messages,
+      connections,
+      toolServerMap,
+      makeFreshState(),
+      "",
+      {
+        cacheOptions: { enabled: true, conversationId: "conv-cap" },
+      },
+    );
+
+    // Tool was dispatched; cap did not interfere.
+    expect(callTool).toHaveBeenCalledTimes(1);
+    expect(receivedArgs.value.data).toHaveLength(15);
+  });
+
+  it("over-cap inline data with data_uri set skips the cap (substitution wins)", async () => {
+    // LLM sent both inline `data` (oversized) AND `data_uri`. The cap
+    // defers to the URI path; substituteCacheUris resolves the URI and
+    // the conflict resolver drops the inline value. Tool sees resolved
+    // inline data of whatever size the cached payload was.
+    const cachedData = makeRecords(50); // any size — cache path is uncapped
+    const uri = await cacheToolResult({
+      payload: cachedData,
+      convId: "conv-cap-conflict",
+      sourceToolName: "query_data",
+      threshold: 1,
+    });
+
+    const receivedArgs = { value: null };
+    const callTool = vi.fn(async ({ arguments: args }) => {
+      receivedArgs.value = args;
+      return {
+        data: {
+          visualization: {
+            uuid: "viz-1",
+            source: "Inline Plotly",
+            vizType: "plotly",
+          },
+        },
+      };
+    });
+    const client = makeFakeClient({ callToolImpl: callTool });
+    const connections = [{ client, transport: null, protocolUsed: "http" }];
+    const toolServerMap = new Map([["create_plotly_chart", 0]]);
+    const messages = [];
+
+    await processToolCalls(
+      [
+        makeToolCall("create_plotly_chart", {
+          data: makeRecords(99), // inline value gets dropped by conflict resolver
+          data_uri: uri,
+        }),
+      ],
+      messages,
+      connections,
+      toolServerMap,
+      makeFreshState(),
+      "",
+      {
+        cacheOptions: { enabled: true, conversationId: "conv-cap-conflict" },
+      },
+    );
+
+    // Tool dispatched with the RESOLVED data (50 records, cap bypassed
+    // because data_uri was present).
+    expect(callTool).toHaveBeenCalledTimes(1);
+    expect(receivedArgs.value.data).toHaveLength(50);
+    expect(receivedArgs.value.data_uri).toBeUndefined();
+  });
+
+  it("cache disabled: cap is not enforced (LLM has no way to produce _cache_uri without the cache)", async () => {
+    const receivedArgs = { value: null };
+    const callTool = vi.fn(async ({ arguments: args }) => {
+      receivedArgs.value = args;
+      return { data: { ok: true } };
+    });
+    const client = makeFakeClient({ callToolImpl: callTool });
+    const connections = [{ client, transport: null, protocolUsed: "http" }];
+    const toolServerMap = new Map([["create_plotly_chart", 0]]);
+    const messages = [];
+
+    await processToolCalls(
+      [makeToolCall("create_plotly_chart", { data: makeRecords(24) })],
+      messages,
+      connections,
+      toolServerMap,
+      makeFreshState(),
+      "",
+      {
+        // cacheOptions omitted → defaults { enabled: false, ... }
+      },
+    );
+
+    // Cap is gated by cacheOptions.enabled — when off, dispatch proceeds.
+    expect(callTool).toHaveBeenCalledTimes(1);
+    expect(receivedArgs.value.data).toHaveLength(24);
   });
 });
