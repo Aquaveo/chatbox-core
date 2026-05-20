@@ -383,6 +383,11 @@ export default function ChatInputBar({
   // used through that wrapper; standalone ChatInputBar consumers pass
   // their own list (or [] for prompts-only behavior).
   clientCommands = [],
+  // Plan 2026-05-19-004 — message history for shell-style ArrowUp/Down
+  // prompt recall. Filtered to `role: "user"` entries on each Up/Down
+  // press; no caching. Default `[]` for standalone consumers without
+  // history to offer.
+  messages = [],
 }) {
   const textareaRef = useRef(null);
 
@@ -405,6 +410,14 @@ export default function ChatInputBar({
   // the same input. Cleared when the input no longer matches the slash
   // regex OR the user types a different token (token diverges).
   const dismissedTokenRef = useRef(null);
+
+  // Plan 2026-05-19-004 — shell-style history nav state. `-1` means "no
+  // recall in progress" (input contains either user typing or empty);
+  // `0` = most recent user message, `1` = second-most-recent, etc.
+  // Lives in refs because the state is ephemeral UX bookkeeping — the
+  // observable change is `input` setState. Mirrors `dismissedTokenRef`.
+  const historyIndexRef = useRef(-1);
+  const draftRef = useRef("");
 
   const popoverId = useId();
   const rowId = useCallback((idx) => `${popoverId}-row-${idx}`, [popoverId]);
@@ -708,6 +721,46 @@ export default function ChatInputBar({
         }
       }
       // Default behavior when popover is closed (or no matches).
+      // Plan 2026-05-19-004 — shell-style history nav. ArrowUp walks
+      // back through prior user messages, ArrowDown walks forward. In
+      // multi-line textareas this overrides line-by-line cursor nav;
+      // Shift+ArrowUp/Down preserves the native behavior.
+      if ((e.key === "ArrowUp" || e.key === "ArrowDown") && !e.shiftKey) {
+        const userMessages = Array.isArray(messages)
+          ? messages.filter((m) => m && m.role === "user").map((m) => m.content)
+          : [];
+        if (userMessages.length === 0) {
+          // No history to recall — fall through to native textarea behavior.
+          return;
+        }
+        e.preventDefault();
+        if (e.key === "ArrowUp") {
+          if (historyIndexRef.current === -1) {
+            draftRef.current = input;
+          }
+          const nextIdx = Math.min(
+            historyIndexRef.current + 1,
+            userMessages.length - 1,
+          );
+          historyIndexRef.current = nextIdx;
+          setInput(userMessages[userMessages.length - 1 - nextIdx]);
+        } else {
+          // ArrowDown
+          if (historyIndexRef.current === -1) {
+            // Already at the live draft — no further forward nav.
+            return;
+          }
+          const nextIdx = historyIndexRef.current - 1;
+          historyIndexRef.current = nextIdx;
+          if (nextIdx === -1) {
+            setInput(draftRef.current);
+            draftRef.current = "";
+          } else {
+            setInput(userMessages[userMessages.length - 1 - nextIdx]);
+          }
+        }
+        return;
+      }
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         // Plan 2026-05-19-001 — direct-type intercept. If the trimmed
@@ -729,10 +782,14 @@ export default function ChatInputBar({
             return;
           }
         }
+        // Plan 2026-05-19-004 — reset history-nav state on send so the
+        // next ArrowUp recalls from a fresh "no recall in progress" slot.
+        historyIndexRef.current = -1;
+        draftRef.current = "";
         onSend();
       }
     },
-    [onSend, popoverOpen, filteredPrompts, highlightedIndex, selectPrompt, triggerToken, input, clientCommands],
+    [onSend, popoverOpen, filteredPrompts, highlightedIndex, selectPrompt, triggerToken, input, clientCommands, messages, setInput],
   );
 
   const handleInput = useCallback(

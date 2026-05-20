@@ -844,3 +844,163 @@ describe("ChatInputBar clientCommands — popover + dispatch", () => {
     expect(getPopover()).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Plan 2026-05-19-004 — shell-style ArrowUp/ArrowDown history nav
+// ---------------------------------------------------------------------------
+
+describe("ChatInputBar history nav", () => {
+  const conversation = [
+    { role: "user", content: "hello" },
+    { role: "assistant", content: "hi" },
+    { role: "user", content: "world" },
+  ];
+
+  it("ArrowUp walks back through user messages; ArrowDown walks forward; restores empty on past-most-recent", () => {
+    const { container } = render(<HostedInputBar messages={conversation} />);
+    const ta = getTextarea(container);
+    expect(ta.value).toBe("");
+    fireKey(ta, { key: "ArrowUp" });
+    expect(ta.value).toBe("world");
+    fireKey(ta, { key: "ArrowUp" });
+    expect(ta.value).toBe("hello");
+    fireKey(ta, { key: "ArrowDown" });
+    expect(ta.value).toBe("world");
+    fireKey(ta, { key: "ArrowDown" });
+    expect(ta.value).toBe("");
+  });
+
+  it("preserves in-progress draft when ArrowUp interrupts typing; restores on ArrowDown past most-recent", () => {
+    const { container } = render(<HostedInputBar messages={conversation} />);
+    const ta = getTextarea(container);
+    typeInto(ta, "unsent draft");
+    expect(ta.value).toBe("unsent draft");
+    fireKey(ta, { key: "ArrowUp" });
+    expect(ta.value).toBe("world");
+    fireKey(ta, { key: "ArrowDown" });
+    expect(ta.value).toBe("unsent draft");
+  });
+
+  it("no user messages → ArrowUp/ArrowDown are no-ops (native behavior, input unchanged)", () => {
+    const { container } = render(
+      <HostedInputBar messages={[{ role: "assistant", content: "hi" }]} />,
+    );
+    const ta = getTextarea(container);
+    typeInto(ta, "typing");
+    fireKey(ta, { key: "ArrowUp" });
+    expect(ta.value).toBe("typing");
+    fireKey(ta, { key: "ArrowDown" });
+    expect(ta.value).toBe("typing");
+  });
+
+  it("ArrowUp at top of history clamps (input stays at oldest user message)", () => {
+    const { container } = render(<HostedInputBar messages={conversation} />);
+    const ta = getTextarea(container);
+    fireKey(ta, { key: "ArrowUp" }); // world
+    fireKey(ta, { key: "ArrowUp" }); // hello (oldest)
+    fireKey(ta, { key: "ArrowUp" }); // stays on hello
+    expect(ta.value).toBe("hello");
+    fireKey(ta, { key: "ArrowUp" });
+    expect(ta.value).toBe("hello");
+  });
+
+  it("Shift+ArrowUp does not trigger history nav (preserves native textarea cursor behavior)", () => {
+    const { container } = render(<HostedInputBar messages={conversation} />);
+    const ta = getTextarea(container);
+    typeInto(ta, "draft");
+    fireKey(ta, { key: "ArrowUp", shiftKey: true });
+    expect(ta.value).toBe("draft");
+    fireKey(ta, { key: "ArrowDown", shiftKey: true });
+    expect(ta.value).toBe("draft");
+  });
+
+  it("popover-open precedence: ArrowUp drives popover nav, not history recall", () => {
+    const { container } = render(
+      <HostedInputBar prompts={examplePrompts} messages={conversation} />,
+    );
+    const ta = getTextarea(container);
+    typeInto(ta, "/");
+    // Popover is open; ArrowDown moves popover highlight, not input value.
+    fireKey(ta, { key: "ArrowDown" });
+    expect(ta.value).toBe("/");
+    const rows = getRows();
+    expect(rows[1].getAttribute("aria-selected")).toBe("true");
+    // ArrowUp also stays in popover-nav mode.
+    fireKey(ta, { key: "ArrowUp" });
+    expect(ta.value).toBe("/");
+    expect(getRows()[0].getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("Enter resets history-nav state and draft slot (subsequent ArrowUp recalls just-sent message, not stale draft)", () => {
+    const onSend = vi.fn();
+    function Host() {
+      const [msgs, setMsgs] = React.useState(conversation);
+      const [val, setVal] = React.useState("");
+      return (
+        <ChatInputBar
+          {...baseProps}
+          input={val}
+          setInput={setVal}
+          messages={msgs}
+          onSend={() => {
+            onSend(val);
+            setMsgs((prev) => [...prev, { role: "user", content: val }]);
+            setVal("");
+          }}
+        />
+      );
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(<ThemeProvider theme={chatTheme}>{<Host />}</ThemeProvider>);
+    });
+    mounted.push({ root, container });
+    const ta = getTextarea(container);
+    // Walk back, then forward to clear, then type fresh and send.
+    fireKey(ta, { key: "ArrowUp" });
+    expect(ta.value).toBe("world");
+    typeInto(ta, "brand new message");
+    fireKey(ta, { key: "Enter" });
+    expect(onSend).toHaveBeenCalledWith("brand new message");
+    expect(ta.value).toBe("");
+    // Next ArrowUp recalls the just-sent message (history reset; index back to -1).
+    fireKey(ta, { key: "ArrowUp" });
+    expect(ta.value).toBe("brand new message");
+  });
+
+  it("editing a recalled prompt forks history (edited text is what gets sent; original unchanged)", () => {
+    const onSend = vi.fn();
+    function Host() {
+      const [msgs] = React.useState(conversation);
+      const [val, setVal] = React.useState("");
+      return (
+        <ChatInputBar
+          {...baseProps}
+          input={val}
+          setInput={setVal}
+          messages={msgs}
+          onSend={() => onSend(val, msgs)}
+        />
+      );
+    }
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(<ThemeProvider theme={chatTheme}>{<Host />}</ThemeProvider>);
+    });
+    mounted.push({ root, container });
+    const ta = getTextarea(container);
+    fireKey(ta, { key: "ArrowUp" });
+    expect(ta.value).toBe("world");
+    typeInto(ta, "world again");
+    fireKey(ta, { key: "Enter" });
+    expect(onSend).toHaveBeenCalledTimes(1);
+    const [sentValue, msgsAtSend] = onSend.mock.calls[0];
+    expect(sentValue).toBe("world again");
+    // Original message is unchanged in the messages array.
+    expect(msgsAtSend.find((m) => m.role === "user" && m.content === "world")).toBeTruthy();
+  });
+});

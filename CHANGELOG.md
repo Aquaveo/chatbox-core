@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Shell-style ArrowUp/ArrowDown prompt history navigation in `<ChatInputBar>`.** ArrowUp walks back through prior user messages; ArrowDown walks forward. Typed-but-unsent text is preserved in a draft slot — pressing ArrowUp saves the in-progress input, walking forward past the most-recent message restores it. Editing a recalled prompt forks history (the edited text is what gets sent; the original entry in `messages` is unchanged). Sending (Enter) resets the nav state so the next ArrowUp recalls the just-sent message.
+
+  Slash-popover ArrowUp/ArrowDown semantics from v0.8.0 are preserved — history nav fires only when the popover is closed. Shift+ArrowUp/Down preserves the native textarea cursor behavior.
+
+  New optional `messages` prop on `<ChatInputBar>` (default `[]`); `<Chatbox>` wires it automatically from its internal `messages` state. Npm consumers using `<ChatInputBar>` standalone can pass their own history array (or omit it; nav becomes a no-op with no history to recall). No new public `<Chatbox>` props.
+
 ## [0.10.0] — 2026-05-19
 
 ### Added

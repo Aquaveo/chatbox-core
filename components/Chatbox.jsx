@@ -1150,6 +1150,7 @@ export default function Chatbox({
       prompts={prompts}
       onPromptSelected={handlePromptSelected}
       clientCommands={mergedClientCommands}
+      messages={messages}
     />
   );
 
