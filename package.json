@@ -1,6 +1,6 @@
 {
   "name": "@aquaveo/chatbox-core",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Generic chatbox engine, UI components, and helpers. Self-contained build — consumers only need react + styled-components.",
   "license": "MIT",
   "author": "Aquaveo LLC",

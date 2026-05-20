@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-05-19
+
 ### Added
 
 - **Shell-style ArrowUp/ArrowDown prompt history navigation in `<ChatInputBar>`.** ArrowUp walks back through prior user messages; ArrowDown walks forward. Typed-but-unsent text is preserved in a draft slot — pressing ArrowUp saves the in-progress input, walking forward past the most-recent message restores it. Editing a recalled prompt forks history (the edited text is what gets sent; the original entry in `messages` is unchanged). Sending (Enter) resets the nav state so the next ArrowUp recalls the just-sent message.
