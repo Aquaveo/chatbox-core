@@ -8,6 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-05-19
+
+### Added
+
+- **Per-Chatbox-mount MCP connection cache.** One transport per server URL is reused across `connectMcpServers`, `executeTool`, `discoverPrompts`, and `getPrompt` for the entire lifetime of a `<Chatbox>` mount. A 10-message conversation against 3 MCP servers now performs 3 `listTools` requests total (one per server, first turn only), not 30.
+
+  New module `engine/connection-cache.js` exports `createConnectionCache()` — a factory returning an in-memory `Map<url, {conn, tools}>` with four lifecycle methods: `getOrOpen(url)`, `invalidate(url)`, `invalidateUrlsNotIn(activeUrls)`, `closeAll()`. Concurrent calls for the same URL share a single in-flight open via a `pendingOpens` dedup Map. The cache is internal to `<Chatbox>` (held via `useRef`); no new public props.
+
+  Engine functions opt in via an optional `{cache}` (or `{cache, memo}` for `discoverPrompts`) parameter. Without a cache, the existing transient open-list-close pattern is preserved — npm consumers that don't construct a cache inherit zero behavior change.
+
+- **Transparent reconnect-and-retry on `callTool` transport errors.** When a cached client's `callTool` throws a transport-level error (server restart, network blip), `executeTool` invalidates the cache entry, reopens the transport, and retries the same tool call once before propagating any failure. The LLM never sees the first transport error. Tool-body error envelopes (`{error: "..."}` returned, not thrown) do NOT trigger retry — only transport-level throws do.
+
+- **`discoverPrompts` URL-set-hash memoization.** `discoverPrompts(servers, {cache, memo})` memoizes its result keyed by sorted-URL-set hash. Reference changes to the `allMcpServers` prop with equal URLs are zero-cost (no transport touch, no `listPrompts` request). URL order doesn't affect the memo key.
+
+- **Allmcpservers URL-set-change cleanup.** When the user toggles, adds, or removes an MCP server, `<Chatbox>` calls `cache.invalidateUrlsNotIn(activeUrls)` to close transports for URLs no longer in the active set. Surviving URLs keep their cached entries.
+
+- **Unmount cleanup.** `<Chatbox>` unmount fires `cache.closeAll()` so no MCP transports outlive the component.
+
+### Internal
+
+- `connectMcpServers` errors from the cache path carry a `_cachePhase` marker (`"transport"` or `"list_tools"`) so the existing errorKey mapping (`notMcpServer` vs `connectionFailed`) works unchanged.
+- `runChatSession` skips its end-of-turn `closeAllMcpConnections` when a `connectionCache` is provided — the cache owns transport lifetime across turns.
+
+### Scope notes
+
+- The probe scheduler (status badge in the MCP server panel) is **NOT** cached. Probe path keeps its current transient-connect-and-close pattern; probe-burst is bounded to once-per-server-per-Chatbox-mount via the existing `hasProbedThisSessionRef`.
+- No TTL-based expiry, no manual "Refresh tools" hook, no cross-mount persistence, no observability surface in v1. All out-of-scope by design and tracked in the brainstorm for follow-up if needed.
+
 ## [0.8.0] — 2026-05-19
 
 ### Added
