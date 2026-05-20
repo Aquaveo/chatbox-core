@@ -8,6 +8,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-05-19
+
+### Added
+
+- **Probe scheduler reuses the v0.9.0 connection cache.** `createProbeScheduler({ ..., cache })` accepts an optional `cache` factory argument. When provided, `runProbe` calls `cache.getOrOpen(url)` instead of opening its own transient transport — sharing one session per server URL across probes, chat turns, discovery, and `getPrompt`. Eliminates the parallel probe-only MCP session per server at panel-open that was visible in v0.9.0.
+
+  On cache hit (chat turn or earlier discovery already populated the URL), the probe resolves with zero new network calls. On cache miss, the resulting transport stays open for downstream operations to reuse (the cache's job).
+
+  The probe scheduler's UX semantics are unchanged: `yellow` intermediate state with `YELLOW_MIN_DISPLAY_MS` min-display timing, bounded concurrency, and `cancel(url)` / `cancelAll()` external behavior all preserved. Probe failures continue to NOT be cached — each panel-open against an unreachable server is a fresh retry.
+
+### Changed
+
+- **`cancel(url)` and `cancelAll()` no longer close cache-owned transports.** When a probe is cancelled with the cache in use, the gen is bumped and the entry is dropped from the in-flight map, but the cache's transport is left intact. Cache owns transport lifetime across the Chatbox mount; cancelling a probe shouldn't destroy a session other operations may be using. Without a cache (npm consumers that don't construct one), `cancel`/`cancelAll` preserve the existing close-on-cancel behavior.
+
+- **`mapProbeError(err, phase)` now reads `err?._cachePhase ?? phase`.** Cache-thrown errors carry a `_cachePhase` marker attached by the v0.9.0 cache module; the new precedence makes the existing errorKey mapping (`notMcpServer` vs `connectionFailed`) work uniformly for cache-path and transient-path failures. Symmetric with v0.9.0's `connectMcpServers` catch block.
+
+### Internal
+
+- `components/Chatbox.jsx`: one-line wire — `cache: getCache()` added to the existing `createProbeScheduler({...})` call. `getCache` declaration moved before `getScheduler` so the latter's useCallback can reference it in its deps array without TDZ violation.
+- Backward compat: every code path is preserved when no `cache` is passed to `createProbeScheduler`. Npm consumers that don't construct a cache see zero behavior change.
+
 ## [0.9.0] — 2026-05-19
 
 ### Added
