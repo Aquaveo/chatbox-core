@@ -216,7 +216,7 @@ export function applyExtensionMessage(messages, extra) {
   return [...messages, extra];
 }
 
-export async function connectMcpServers(mcpServers) {
+export async function connectMcpServers(mcpServers, { cache } = {}) {
   const connections = [];
   const tools = [];
   const toolServerMap = new Map();
@@ -237,16 +237,31 @@ export async function connectMcpServers(mcpServers) {
 
     // Track which phase threw so we can distinguish transport failures from
     // list_tools RPC failures (the latter means the URL speaks *something*
-    // but not MCP, which is a different user-facing error).
+    // but not MCP, which is a different user-facing error). When the cache
+    // is in use, errors carry a `_cachePhase` marker we map onto `phase`
+    // so the existing error-key mapping below works unchanged.
     let phase = "transport";
 
     try {
-      const conn = await pickTransportWithRetry(server.url);
+      let conn;
+      let toolsList;
+      if (cache) {
+        // Cache path — getOrOpen handles pickTransportWithRetry + listTools
+        // + LIST_TOOLS_BUDGET_MS timeout internally. On cache hit it
+        // returns the prior entry without re-fetching. Errors propagate
+        // with `_cachePhase` set; we map onto local `phase` below.
+        const entry = await cache.getOrOpen(server.url);
+        conn = entry.conn;
+        toolsList = entry.tools;
+      } else {
+        // Transient path — existing behavior preserved for callers that
+        // don't construct a cache (e.g., npm consumers, isolated tests).
+        conn = await pickTransportWithRetry(server.url);
+        phase = "list_tools";
+        const response = await withTimeout(conn.client.listTools(), LIST_TOOLS_BUDGET_MS);
+        toolsList = Array.isArray(response?.tools) ? response.tools : [];
+      }
       connections.push(conn);
-
-      phase = "list_tools";
-      const response = await withTimeout(conn.client.listTools(), LIST_TOOLS_BUDGET_MS);
-      const toolsList = Array.isArray(response?.tools) ? response.tools : [];
 
       for (const tool of toolsList) {
         const parameters =
@@ -294,10 +309,13 @@ export async function connectMcpServers(mcpServers) {
       // transport failures with `errorKey`; list_tools RPC errors fall through
       // to `notMcpServer`; timeouts win over phase-mapping so a slow server
       // doesn't get misreported as "not an MCP server".
+      // The cache path attaches `_cachePhase` so the existing mapping logic
+      // works for cache-routed errors too.
+      const effectivePhase = error?._cachePhase ?? phase;
       let errorKey;
       if (error?.isTimeout) {
         errorKey = ERROR_KEYS.timeout;
-      } else if (phase === "list_tools") {
+      } else if (effectivePhase === "list_tools") {
         errorKey = ERROR_KEYS.notMcpServer;
       } else {
         errorKey = error?.errorKey ?? ERROR_KEYS.connectionFailed;
@@ -386,7 +404,7 @@ function _isMethodNotFound(err) {
  *   perServer: Array<{serverId: string, promptCount: number, errorKey: ?string}>
  * }>}
  */
-export async function discoverPrompts(mcpServers) {
+export async function discoverPrompts(mcpServers, { cache, memo } = {}) {
   // Nil/empty contract — return synchronously, no transport opened.
   if (!Array.isArray(mcpServers) || mcpServers.length === 0) {
     return {
@@ -394,6 +412,21 @@ export async function discoverPrompts(mcpServers) {
       promptServerMap: new Map(),
       perServer: [],
     };
+  }
+
+  // Plan 2026-05-19-002 — memoize by sorted-URL-set key. When the
+  // caller's `allMcpServers` reference changes but the URLs are
+  // unchanged, return the prior result without opening any transport.
+  // The memo is caller-held (Chatbox.jsx useRef) so its lifetime
+  // matches the Chatbox mount.
+  const urlsKey =
+    mcpServers
+      .map((s) => s?.url)
+      .filter((u) => typeof u === "string")
+      .sort()
+      .join("|");
+  if (memo && memo.lastUrlsKey === urlsKey && memo.lastResult) {
+    return memo.lastResult;
   }
 
   const promptsByServer = {};
@@ -405,12 +438,22 @@ export async function discoverPrompts(mcpServers) {
     const serverId = String(i);
     promptsByServer[serverId] = [];
 
+    // When a cache is in use, the cached entry already shares a
+    // transport with the tool path — no fresh open + no close-on-finally.
+    // Without a cache, fall back to today's transient pattern.
     let conn = null;
+    let ownedByCache = false;
     let phase = "transport";
     let errorKey = null;
 
     try {
-      conn = await pickTransportWithRetry(server.url);
+      if (cache) {
+        const entry = await cache.getOrOpen(server.url);
+        conn = entry.conn;
+        ownedByCache = true;
+      } else {
+        conn = await pickTransportWithRetry(server.url);
+      }
       phase = "list_prompts";
       const response = await withTimeout(
         conn.client.listPrompts(),
@@ -447,7 +490,9 @@ export async function discoverPrompts(mcpServers) {
         errorKey = error?.errorKey ?? ERROR_KEYS.connectionFailed;
       }
     } finally {
-      if (conn) {
+      // Only close transient connections — cache-owned transports stay
+      // open for reuse across discoverPrompts / runChatSession / getPrompt.
+      if (conn && !ownedByCache) {
         await closeMcpConnection(conn);
       }
     }
@@ -459,7 +504,16 @@ export async function discoverPrompts(mcpServers) {
     });
   }
 
-  return { promptsByServer, promptServerMap, perServer };
+  const result = { promptsByServer, promptServerMap, perServer };
+
+  // Plan 2026-05-19-002 — persist into the caller's memo so the next
+  // call with the same URL set short-circuits.
+  if (memo) {
+    memo.lastUrlsKey = urlsKey;
+    memo.lastResult = result;
+  }
+
+  return result;
 }
 
 /**
@@ -479,15 +533,22 @@ export async function discoverPrompts(mcpServers) {
  * @param {Array} mcpServers
  * @returns {Promise<string>}
  */
-export async function getPrompt(serverIdx, promptName, args, mcpServers) {
+export async function getPrompt(serverIdx, promptName, args, mcpServers, { cache } = {}) {
   const server = mcpServers?.[serverIdx];
   if (!server) {
     throw new Error(`No MCP server at index ${serverIdx}`);
   }
 
   let conn = null;
+  let ownedByCache = false;
   try {
-    conn = await pickTransportWithRetry(server.url);
+    if (cache) {
+      const entry = await cache.getOrOpen(server.url);
+      conn = entry.conn;
+      ownedByCache = true;
+    } else {
+      conn = await pickTransportWithRetry(server.url);
+    }
     const result = await conn.client.getPrompt({
       name: promptName,
       arguments: args ?? {},
@@ -514,14 +575,35 @@ export async function getPrompt(serverIdx, promptName, args, mcpServers) {
       );
     }
     return text;
+  } catch (err) {
+    // Plan 2026-05-19-002 — invalidate the cached transport on error so
+    // the next operation reopens fresh. Best-effort; don't block the
+    // throw on the close. EmptyPromptError isn't a transport problem
+    // but it's a single forgivable cost to invalidate it too — the
+    // alternative (typeof-checking error class) leaks knowledge across
+    // module boundaries. The next getPrompt re-opens the transport.
+    if (cache && ownedByCache) {
+      cache.invalidate(server.url).catch(() => {
+        /* best effort */
+      });
+    }
+    throw err;
   } finally {
-    if (conn) {
+    // Only close transient connections — cache-owned transports stay
+    // open for reuse across other operations on the same URL.
+    if (conn && !ownedByCache) {
       await closeMcpConnection(conn);
     }
   }
 }
 
-export async function executeTool(toolName, args, connections, toolServerMap) {
+export async function executeTool(
+  toolName,
+  args,
+  connections,
+  toolServerMap,
+  { cache, servers } = {},
+) {
   const serverIdx = toolServerMap.get(toolName);
   const conn = serverIdx != null ? connections[serverIdx] : null;
   const mcpClient = conn?.client;
@@ -530,22 +612,51 @@ export async function executeTool(toolName, args, connections, toolServerMap) {
     return { error: `No MCP server found for tool: ${toolName}` };
   }
 
-  try {
-    const result = await mcpClient.callTool({
-      name: toolName,
-      arguments: omitEmptyArgs(args),
-      raiseOnError: false,
-    });
+  const callArgs = {
+    name: toolName,
+    arguments: omitEmptyArgs(args),
+    raiseOnError: false,
+  };
 
+  // Inline helper — convert a callTool return value into the engine's
+  // structured result. Mirrors the original return shape exactly.
+  const shapeResult = (result) => {
     const data = result?.data;
     if (data !== undefined && data !== null) return maybeParseJson(data);
-
     try {
       return maybeParseJson(result?.content?.[0]?.text ?? result);
     } catch {
       return result;
     }
+  };
+
+  try {
+    const result = await mcpClient.callTool(callArgs);
+    return shapeResult(result);
   } catch (error) {
+    // Cache-aware retry: if the cached transport broke (server restarted,
+    // network blip), invalidate + reopen + retry once. The LLM never sees
+    // the first transport error. Only triggers when both `cache` and
+    // `servers` are provided AND we can resolve a URL — preserves
+    // backward compat for callers without a cache.
+    if (cache && Array.isArray(servers) && serverIdx != null) {
+      const url = servers[serverIdx]?.url;
+      if (url) {
+        try {
+          await cache.invalidate(url);
+          const entry = await cache.getOrOpen(url);
+          // Update the per-turn connections array so subsequent tool calls
+          // this turn use the fresh client.
+          connections[serverIdx] = entry.conn;
+          const retryResult = await entry.conn.client.callTool(callArgs);
+          return shapeResult(retryResult);
+        } catch (retryError) {
+          // Retry also failed — return the retry's error, which is the
+          // most recent and most informative.
+          return { error: String(retryError?.message ?? retryError) };
+        }
+      }
+    }
     return { error: String(error?.message ?? error) };
   }
 }
@@ -698,6 +809,12 @@ export async function processToolCalls(
     // see no behavior change. tethysapp-tethys_dash sets enabled=true on
     // its <ChatSidebar> mount via Unit 4's host prop.
     cacheOptions = { enabled: false, conversationId: "default" },
+    // MCP connection cache (plan 2026-05-19-002). When provided alongside
+    // `servers`, `executeTool` retries once after a transport-level error
+    // (invalidate cache + reopen + retry the same callTool). Default null
+    // preserves transient-connect behavior for callers without a cache.
+    connectionCache = null,
+    servers = null,
   },
 ) {
   let hadError = false;
@@ -791,7 +908,11 @@ export async function processToolCalls(
     fireStatus({ type: "tool_start", toolName });
     let toolResult;
     try {
-      toolResult = await executeTool(toolName, args, connections, toolServerMap);
+      toolResult = await executeTool(toolName, args, connections, toolServerMap, {
+        cache: connectionCache,
+        servers,
+      });
+
     } catch (err) {
       // Fire a failure status so the indicator flashes "Failed: ..."
       // before the exception propagates and the turn aborts.
@@ -1124,6 +1245,11 @@ export async function runChatSession({
   // explicitly via Unit 4's host prop.
   enableResultCache = false,
   conversationId = "default",
+  // MCP connection cache (plan 2026-05-19-002). When provided, the
+  // engine reuses one transport per server URL across turns instead of
+  // opening fresh and closing at end-of-turn. Default null preserves
+  // existing transient-connect behavior for callers without a cache.
+  connectionCache = null,
 }) {
   const cacheOptions = { enabled: !!enableResultCache, conversationId };
 
@@ -1171,7 +1297,7 @@ export async function runChatSession({
       : [];
 
   const { connections, tools, toolServerMap, toolTagsByName, toolsByServer, classificationByServer, perServer } =
-    await connectMcpServers(servers);
+    await connectMcpServers(servers, { cache: connectionCache });
 
   // Build embeddings for large full-catalog servers (lazy, cached across messages).
   const embeddingsByServer = {};
@@ -1326,6 +1452,8 @@ export async function runChatSession({
         {
           toolCategories, beforeToolExecution, toolErrorCheck, afterToolExecution, onToolStatus,
           cacheOptions,
+          connectionCache,
+          servers,
         },
       );
 
@@ -1448,6 +1576,8 @@ export async function runChatSession({
             {
               toolCategories, beforeToolExecution, toolErrorCheck, afterToolExecution, onToolStatus,
               cacheOptions,
+              connectionCache,
+              servers,
             },
           ));
 
@@ -1474,6 +1604,11 @@ export async function runChatSession({
       }
     }
   } finally {
-    await closeAllMcpConnections(connections);
+    // Plan 2026-05-19-002 — when a connection cache is in use it owns the
+    // transport lifetime (close happens on Chatbox unmount + URL-set
+    // change). Without a cache, preserve today's end-of-turn close.
+    if (!connectionCache) {
+      await closeAllMcpConnections(connections);
+    }
   }
 }

@@ -392,6 +392,7 @@ describe("Chatbox prompts selection — R7 happy path + R11 error placement", ()
       "plot_timeseries",
       {},
       expect.any(Array),
+      expect.any(Object),
     );
     expect(textarea.value).toMatch(/Retrieve a line chart for variable \[variable\]/);
   });
@@ -437,6 +438,7 @@ describe("Chatbox prompts selection — R7 happy path + R11 error placement", ()
         date: "[yyyy-mm-dd]",
       },
       expect.any(Array),
+      expect.any(Object),
     );
     // The rendered text (mocked) is the result; assert input was filled.
     expect(textarea.value).toMatch(/cfe_nom \/ lstm \/ routing_only/);
@@ -479,6 +481,7 @@ describe("Chatbox prompts selection — R7 happy path + R11 error placement", ()
       "plot_timeseries",
       { date: "[yyyy-mm-dd]" },
       expect.any(Array),
+      expect.any(Object),
     );
   });
 
@@ -522,6 +525,7 @@ describe("Chatbox prompts selection — R7 happy path + R11 error placement", ()
         to: '[Destination station name (e.g. "Fulton St")]',
       },
       expect.any(Array),
+      expect.any(Object),
     );
     expect(textarea.value).toMatch(/Times Square/);
     expect(textarea.value).toMatch(/Fulton St/);
@@ -564,6 +568,7 @@ describe("Chatbox prompts selection — R7 happy path + R11 error placement", ()
       "mixed",
       { needed: "[must supply]" },
       expect.any(Array),
+      expect.any(Object),
     );
   });
 
@@ -602,6 +607,7 @@ describe("Chatbox prompts selection — R7 happy path + R11 error placement", ()
       "no-desc",
       { anon: "[anon]" },
       expect.any(Array),
+      expect.any(Object),
     );
   });
 
@@ -648,6 +654,7 @@ describe("Chatbox prompts selection — R7 happy path + R11 error placement", ()
       "bad-args",
       {},
       expect.any(Array),
+      expect.any(Object),
     );
     expect(textarea.value).toMatch(/ok despite bad args/);
   });
@@ -705,6 +712,7 @@ describe("Chatbox prompts selection — R7 happy path + R11 error placement", ()
       "partial",
       { good: "[good hint]" },
       expect.any(Array),
+      expect.any(Object),
     );
     const callArgs = getPrompt.mock.calls[0][2];
     // toEqual(["good"]) already proves no other keys are present, but
