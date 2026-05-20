@@ -127,6 +127,75 @@ function maybeWarnConflict(next, targetKey) {
 }
 
 /**
+ * Default cap on inline list-arg sizes for tools that pair an arg with
+ * a `<name>_uri` cache-URI alternative (today: `data`). Inline arrays
+ * larger than this reliably exceed small-model output bounds. Observed
+ * bug 2026-05-19: nemotron-3-nano-30b corrupting JSON at ~1.2KB on a
+ * 24-record array; symptom was `data is not valid JSON: Extra data:
+ * line 1 column 1275`. The cap forces the LLM toward `data_uri` for
+ * any payload over this size; the cache-URI substitution layer below
+ * resolves the URI server-side without re-emitting the bytes.
+ */
+export const INLINE_LIST_MAX_RECORDS = 20;
+
+// Convention-based scope: only arg names paired with a `<name>_uri`
+// cache-URI alternative get capped. Today: `data` (create_plotly_chart,
+// create_data_table, create_card). Future tools can extend by adding
+// the arg name here.
+const CAPPED_INLINE_ARGS = new Set(["data"]);
+
+/**
+ * Pre-dispatch cap check on inline list args. Returns `null` when no
+ * cap is violated; returns an envelope shaped like the cache-miss
+ * envelope (error + fix_hint, plus a `_capped_arg` marker for engine
+ * signature tracking) when an arg exceeds the cap AND the LLM did not
+ * set the corresponding `*_uri` alternative.
+ *
+ * Call this BEFORE `substituteCacheUris` so cache-URI-resolved payloads
+ * (regardless of size) pass through unaffected — the cap targets the
+ * LLM's emission, not the resolved data. When the LLM set BOTH `data`
+ * (inline) and `data_uri` (URI), the URI path wins per `maybeWarnConflict`
+ * and the cap is skipped here.
+ *
+ * @param {string} toolName - tool being invoked (used in error text and fix_hint)
+ * @param {object} args - the LLM-emitted args
+ * @param {number} [cap=INLINE_LIST_MAX_RECORDS] - tunable threshold
+ * @returns {object|null} envelope or null
+ */
+export function checkInlineListCap(
+  toolName,
+  args,
+  cap = INLINE_LIST_MAX_RECORDS,
+) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return null;
+  for (const argName of CAPPED_INLINE_ARGS) {
+    const value = args[argName];
+    if (!Array.isArray(value)) continue;
+    if (value.length <= cap) continue;
+    const uriKey = `${argName}_uri`;
+    // LLM set the URI alternative — substitution will resolve it.
+    // Defer to maybeWarnConflict for the both-set case.
+    if (args[uriKey] !== undefined) continue;
+    return {
+      error:
+        `invalid_args: \`${argName}\` has ${value.length} records ` +
+        `(cap: ${cap}). Inline arrays this large exceed small-model ` +
+        `output bounds and reliably produce JSON parse errors at the ` +
+        `~1KB threshold. Use \`${uriKey}\` — pass the \`_cache_uri\` ` +
+        `field that was auto-injected on the source tool's result ` +
+        `envelope. The engine resolves the URI without re-emitting ` +
+        `the bytes.`,
+      fix_hint:
+        `Retry \`${toolName}\` with \`${uriKey}=<_cache_uri value from ` +
+        `a prior tool result>\` instead of inlining \`${argName}\`. ` +
+        `Records under ${cap} can still be inlined.`,
+      _capped_arg: argName,
+    };
+  }
+  return null;
+}
+
+/**
  * Build the invalid_args envelope the engine surfaces to the LLM on
  * cache miss. Shape mirrors the input-validation-middleware envelope so
  * the LLM's existing recovery pattern applies.

@@ -29,7 +29,7 @@ import {
 } from "./transports.js";
 import { ERROR_KEYS } from "./mcpErrors.js";
 import { cacheToolResult } from "./cache.js";
-import { substituteCacheUris } from "./uri-substitution.js";
+import { substituteCacheUris, checkInlineListCap } from "./uri-substitution.js";
 import { trimConversation } from "../conversation/index.js";
 import { buildGenericSystemMessage } from "../messages/index.js";
 import {
@@ -870,6 +870,31 @@ export async function processToolCalls(
     // explicit so a future tool whose URI value happens to match a
     // placeholder shape gets resolved as URI first.
     if (cacheOptions?.enabled && args && typeof args === "object") {
+      // Pre-substitution inline-list cap. Catches the LLM emitting too
+      // many records inline (observed bug 2026-05-19 with
+      // nemotron-3-nano-30b: 24-record inline arrays produce JSON parse
+      // errors at ~column 1275). Returns an actionable error envelope
+      // naming the `_cache_uri` path; the LLM retries with `data_uri` on
+      // the next round. Cache-URI-resolved payloads (any size) skip this
+      // check because the LLM set the URI alternative and substitution
+      // below resolves it without re-emitting the bytes.
+      const capError = checkInlineListCap(toolName, args);
+      if (capError) {
+        fireStatus({ type: "tool_start", toolName });
+        fireStatus({ type: "tool_complete", toolName, success: false });
+        messages.push({
+          role: "tool",
+          tool_call_id: toolCall.id || toolName,
+          tool_name: toolName,
+          content: JSON.stringify({ ...capError, _engine_dispatched: [] }),
+        });
+        hadError = true;
+        lastErr = new Error(capError.error);
+        failedSignatures.push(
+          `${toolName}|inline-cap|${capError._capped_arg}`,
+        );
+        continue;
+      }
       const subResult = await substituteCacheUris(args);
       if (!subResult.ok) {
         // Cache miss — short-circuit dispatch and push the envelope as
