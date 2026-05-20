@@ -34,7 +34,12 @@ const DEFAULT_CONCURRENCY = 4;
  * to any errorKey tagged by pickTransport, or connectionFailed.
  */
 function mapProbeError(err, phase) {
-  if (phase === "list_tools") return ERROR_KEYS.notMcpServer;
+  // Plan 2026-05-19-003 — cache-thrown errors carry `_cachePhase`
+  // ("transport" | "list_tools") so the existing phase-driven mapping
+  // works without distinguishing transient-path vs cache-path failures.
+  // Symmetric with engine/index.js connectMcpServers catch block (v0.9.0).
+  const effectivePhase = err?._cachePhase ?? phase;
+  if (effectivePhase === "list_tools") return ERROR_KEYS.notMcpServer;
   if (err?.isTimeout) return ERROR_KEYS.timeout;
   return err?.errorKey ?? ERROR_KEYS.connectionFailed;
 }
@@ -71,9 +76,9 @@ export async function probeMcpServer(url) {
  *   - `{ state: "connected" | "no-tools" }` on success
  *   - `{ state: "failed", errorKey }` on error
  */
-export function createProbeScheduler({ onUpdate, concurrency = DEFAULT_CONCURRENCY } = {}) {
+export function createProbeScheduler({ onUpdate, concurrency = DEFAULT_CONCURRENCY, cache = null } = {}) {
   const queue = [];                 // Array<{url, gen}>
-  const running = new Map();        // url -> { gen, startedAt, conn? }
+  const running = new Map();        // url -> { gen, startedAt, conn?, ownedByCache? }
   const pendingWrites = new Map();  // url -> setTimeout handle
   const generations = new Map();    // url -> number
 
@@ -104,20 +109,35 @@ export function createProbeScheduler({ onUpdate, concurrency = DEFAULT_CONCURREN
     let result;
     let phase = "transport";
     try {
-      entry.conn = await pickTransportWithRetry(url);
-      phase = "list_tools";
-      const response = await withTimeout(
-        entry.conn.client.listTools(),
-        LIST_TOOLS_BUDGET_MS,
-      );
-      const tools = Array.isArray(response?.tools) ? response.tools : [];
-      result = tools.length === 0 ? { state: "no-tools" } : { state: "connected" };
+      if (cache) {
+        // Plan 2026-05-19-003 — cache path. `getOrOpen` handles transport
+        // open + listTools (with the same LIST_TOOLS_BUDGET_MS timeout)
+        // internally; on cache hit it returns the entry without re-fetching.
+        // Errors carry `_cachePhase` for mapProbeError. Mark the conn as
+        // cache-owned so cancel/finally don't try to close it.
+        const cacheEntry = await cache.getOrOpen(url);
+        entry.conn = cacheEntry.conn;
+        entry.ownedByCache = true;
+        const tools = cacheEntry.tools;
+        result = tools.length === 0 ? { state: "no-tools" } : { state: "connected" };
+      } else {
+        entry.conn = await pickTransportWithRetry(url);
+        phase = "list_tools";
+        const response = await withTimeout(
+          entry.conn.client.listTools(),
+          LIST_TOOLS_BUDGET_MS,
+        );
+        const tools = Array.isArray(response?.tools) ? response.tools : [];
+        result = tools.length === 0 ? { state: "no-tools" } : { state: "connected" };
+      }
     } catch (err) {
       result = { state: "failed", errorKey: mapProbeError(err, phase) };
     }
 
-    // Close the transport regardless of outcome.
-    if (entry.conn) {
+    // Close the transport only when we own it. Cache-owned transports
+    // stay open for reuse across chat turns, discovery, and getPrompt
+    // (the cache's own closeAll on Chatbox unmount handles their teardown).
+    if (entry.conn && !entry.ownedByCache) {
       await closeMcpConnection(entry.conn);
       entry.conn = null;
     }
@@ -183,9 +203,12 @@ export function createProbeScheduler({ onUpdate, concurrency = DEFAULT_CONCURREN
 
     const entry = running.get(url);
     if (entry) {
-      if (entry.conn) {
-        // Close the transport best-effort; runProbe's finally path will
-        // observe the stale gen and silently drop its result.
+      if (entry.conn && !entry.ownedByCache) {
+        // Plan 2026-05-19-003 — only close transient (non-cache-owned)
+        // conns. Cache-owned transports have their lifetime managed by
+        // Chatbox.jsx's unmount + URL-set-change effects (v0.9.0).
+        // Cancelling a probe should not destroy a session that other
+        // operations (chat turns, discovery, getPrompt) may be using.
         closeMcpConnection(entry.conn).catch(() => { /* best effort */ });
         entry.conn = null;
       }

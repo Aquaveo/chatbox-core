@@ -377,3 +377,204 @@ describe("createProbeScheduler — destroyed flag", () => {
     }).not.toThrow();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Plan 2026-05-19-003 — cache-aware probe scheduler
+// ---------------------------------------------------------------------------
+
+describe("createProbeScheduler — cache integration (plan 2026-05-19-003)", () => {
+  function makeCacheMock({ getOrOpen } = {}) {
+    return {
+      getOrOpen: getOrOpen || vi.fn(),
+      invalidate: vi.fn(() => Promise.resolve()),
+      invalidateUrlsNotIn: vi.fn(() => Promise.resolve()),
+      closeAll: vi.fn(() => Promise.resolve()),
+    };
+  }
+
+  it("cache hit: skips pickTransportWithRetry + closeMcpConnection; final state derives from cache.tools", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const onUpdate = vi.fn();
+    const conn = makeFakeConn();
+    const cache = makeCacheMock({
+      getOrOpen: vi.fn(() => Promise.resolve({ conn, tools: [{ name: "t1" }] })),
+    });
+    const scheduler = createProbeScheduler({ onUpdate, cache });
+
+    scheduler.schedule("https://a/");
+    expect(onUpdate).toHaveBeenNthCalledWith(
+      1,
+      "https://a/",
+      expect.objectContaining({ state: "yellow" }),
+    );
+
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(400);
+
+    expect(cache.getOrOpen).toHaveBeenCalledWith("https://a/");
+    expect(pickTransportWithRetry).not.toHaveBeenCalled();
+    expect(closeMcpConnection).not.toHaveBeenCalled();
+    expect(onUpdate).toHaveBeenLastCalledWith("https://a/", { state: "connected" });
+  });
+
+  it("cache hit with empty tools: state:no-tools", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const onUpdate = vi.fn();
+    const cache = makeCacheMock({
+      getOrOpen: vi.fn(() => Promise.resolve({ conn: makeFakeConn(), tools: [] })),
+    });
+    const scheduler = createProbeScheduler({ onUpdate, cache });
+    scheduler.schedule("https://a/");
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(onUpdate).toHaveBeenLastCalledWith("https://a/", { state: "no-tools" });
+  });
+
+  it("no cache (backward compat): pickTransportWithRetry + closeMcpConnection path preserved", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const onUpdate = vi.fn();
+    const conn = makeFakeConn({ tools: [{ name: "t1" }] });
+    pickTransportWithRetry.mockResolvedValueOnce(conn);
+
+    const scheduler = createProbeScheduler({ onUpdate });
+    scheduler.schedule("https://a/");
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(400);
+
+    expect(pickTransportWithRetry).toHaveBeenCalledTimes(1);
+    expect(closeMcpConnection).toHaveBeenCalledWith(conn);
+    expect(onUpdate).toHaveBeenLastCalledWith("https://a/", { state: "connected" });
+  });
+
+  it("cache.getOrOpen throws transport error (_cachePhase='transport' + errorKey): state:failed/connection-failed", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const onUpdate = vi.fn();
+    const err = new Error("connect failed");
+    err.errorKey = ERROR_KEYS.connectionFailed;
+    err._cachePhase = "transport";
+    const cache = makeCacheMock({ getOrOpen: vi.fn(() => Promise.reject(err)) });
+    const scheduler = createProbeScheduler({ onUpdate, cache });
+    scheduler.schedule("https://a/");
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(400);
+
+    expect(onUpdate).toHaveBeenLastCalledWith("https://a/", {
+      state: "failed",
+      errorKey: ERROR_KEYS.connectionFailed,
+    });
+    expect(closeMcpConnection).not.toHaveBeenCalled();
+  });
+
+  it("cache.getOrOpen throws list_tools error (_cachePhase='list_tools'): state:failed/not-mcp-server", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const onUpdate = vi.fn();
+    const err = new Error("listTools failed");
+    err._cachePhase = "list_tools";
+    const cache = makeCacheMock({ getOrOpen: vi.fn(() => Promise.reject(err)) });
+    const scheduler = createProbeScheduler({ onUpdate, cache });
+    scheduler.schedule("https://a/");
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(400);
+
+    expect(onUpdate).toHaveBeenLastCalledWith("https://a/", {
+      state: "failed",
+      errorKey: ERROR_KEYS.notMcpServer,
+    });
+  });
+
+  it("cancel during in-flight cache.getOrOpen: late resolve is dropped; cache transport NOT closed", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const onUpdate = vi.fn();
+    let resolveOpen;
+    const cache = makeCacheMock({
+      getOrOpen: vi.fn(() => new Promise((res) => { resolveOpen = res; })),
+    });
+    const scheduler = createProbeScheduler({ onUpdate, cache });
+
+    scheduler.schedule("https://a/");
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    scheduler.cancel("https://a/");
+
+    resolveOpen({ conn: makeFakeConn(), tools: [{ name: "t1" }] });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(400);
+
+    expect(closeMcpConnection).not.toHaveBeenCalled();
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancel during in-flight pickTransportWithRetry (no cache): close-on-cancel preserved", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const onUpdate = vi.fn();
+    let resolvePick;
+    pickTransportWithRetry.mockReturnValueOnce(
+      new Promise((res) => { resolvePick = res; }),
+    );
+
+    const scheduler = createProbeScheduler({ onUpdate });
+    scheduler.schedule("https://a/");
+    const conn = makeFakeConn({ tools: [] });
+    resolvePick(conn);
+    await vi.advanceTimersByTimeAsync(0);
+    scheduler.cancel("https://a/");
+
+    expect(closeMcpConnection).toHaveBeenCalledWith(conn);
+  });
+
+  it("cancelAll with cache: bumps gens + drops running but does NOT close cache-owned conns", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const onUpdate = vi.fn();
+    let resolveOpen;
+    const cache = makeCacheMock({
+      getOrOpen: vi.fn(() => new Promise((res) => { resolveOpen = res; })),
+    });
+    const scheduler = createProbeScheduler({ onUpdate, cache });
+
+    scheduler.schedule("https://a/");
+    scheduler.cancelAll();
+
+    resolveOpen({ conn: makeFakeConn(), tools: [{ name: "t1" }] });
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(400);
+
+    expect(closeMcpConnection).not.toHaveBeenCalled();
+  });
+
+  it("cancelAll without cache (backward compat): in-flight conn closed", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const onUpdate = vi.fn();
+    let resolvePick;
+    pickTransportWithRetry.mockReturnValueOnce(
+      new Promise((res) => { resolvePick = res; }),
+    );
+
+    const scheduler = createProbeScheduler({ onUpdate });
+    scheduler.schedule("https://a/");
+    const conn = makeFakeConn({ tools: [] });
+    resolvePick(conn);
+    await vi.advanceTimersByTimeAsync(0);
+    scheduler.cancelAll();
+
+    expect(closeMcpConnection).toHaveBeenCalledWith(conn);
+  });
+
+  it("integration with real connection-cache: 1 pickTransportWithRetry total across cache.getOrOpen + scheduler.schedule for same URL", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { createConnectionCache } = await import("./connection-cache.js");
+    const conn = makeFakeConn({ tools: [{ name: "t1" }] });
+    pickTransportWithRetry.mockResolvedValue(conn);
+
+    const cache = createConnectionCache();
+    await cache.getOrOpen("https://a/");
+    expect(pickTransportWithRetry).toHaveBeenCalledTimes(1);
+
+    const onUpdate = vi.fn();
+    const scheduler = createProbeScheduler({ onUpdate, cache });
+    scheduler.schedule("https://a/");
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(400);
+
+    expect(pickTransportWithRetry).toHaveBeenCalledTimes(1);
+    expect(onUpdate).toHaveBeenLastCalledWith("https://a/", { state: "connected" });
+  });
+});

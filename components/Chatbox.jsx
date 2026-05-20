@@ -392,6 +392,24 @@ export default function Chatbox({
   // reads-then-writes via functional setState so concurrent probe
   // resolutions coalesce correctly.
   //
+  // Plan 2026-05-19-002 — per-mount MCP connection cache. Reuses one
+  // transport per server URL across discoverPrompts, runChatSession's
+  // listTools, executeTool, and getPrompt calls. Lazy-init mirrors
+  // `getScheduler` below (allocation skipped if no MCP work ever fires
+  // — rare but cheap to support). Cleanup runs on unmount + on
+  // allMcpServers URL-set change.
+  //
+  // Declared BEFORE `getScheduler` because plan 2026-05-19-003 has
+  // `getScheduler` referencing `getCache` in its body + deps array.
+  const cacheRef = useRef(null);
+  const discoverMemoRef = useRef({});
+  const getCache = useCallback(() => {
+    if (!cacheRef.current) {
+      cacheRef.current = createConnectionCache();
+    }
+    return cacheRef.current;
+  }, []);
+
   // Declared BEFORE the add/toggle/remove handlers so their useCallback
   // deps arrays can reference it without a TDZ violation.
   const getScheduler = useCallback(() => {
@@ -404,25 +422,15 @@ export default function Chatbox({
             return next;
           });
         },
+        // Plan 2026-05-19-003 — share the per-mount connection cache with
+        // the probe scheduler. Probes reuse cached transports opened by
+        // chat turns / discovery / getPrompt instead of opening a parallel
+        // transient session per panel-open.
+        cache: getCache(),
       });
     }
     return schedulerRef.current;
-  }, []);
-
-  // Plan 2026-05-19-002 — per-mount MCP connection cache. Reuses one
-  // transport per server URL across discoverPrompts, runChatSession's
-  // listTools, executeTool, and getPrompt calls. Lazy-init mirrors
-  // `getScheduler` above (allocation skipped if no MCP work ever fires
-  // — rare but cheap to support). Cleanup runs on unmount + on
-  // allMcpServers URL-set change.
-  const cacheRef = useRef(null);
-  const discoverMemoRef = useRef({});
-  const getCache = useCallback(() => {
-    if (!cacheRef.current) {
-      cacheRef.current = createConnectionCache();
-    }
-    return cacheRef.current;
-  }, []);
+  }, [getCache]);
 
   const handleAddMcpServer = useCallback((server) => {
     const result = addMcpServer(server);
